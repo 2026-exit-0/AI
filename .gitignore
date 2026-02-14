@@ -1,4 +1,4 @@
-# 가상 환경 (용량이 크고 공유할 필요 없음)
+# 가상 환경
 venv/
 .venv/
 env/
@@ -16,5 +16,5 @@ processed_data/
 .DS_Store
 Thumbs.db
 
-# VS Code 설정 관련 (개인 취향 차이)
+# VS Code 설정 관련
 .vscode/

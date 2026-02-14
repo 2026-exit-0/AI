@@ -1,45 +1,60 @@
-import cv2
 import os
-import cv2
+import shutil
+from PIL import Image
+import torch
+from torchvision import transforms as T
+from torchvision.utils import save_image  # 저장을 위한 라이브러리 추가
 
-# 입력 경로를 실제 폴더명인 data_sbP로 변경
-input_dir = './data_sbP' 
-output_dir = './preprocessed_images'
+# 1. 설정 및 경로
+INPUT_DIR = './data_sbP'
+OUTPUT_DIR = './processed_data'
+IMG_SIZE = 448 
 
-# 폴더 존재 확인 (오타 방지)
-if not os.path.exists(input_dir):
-    print(f"경고: '{input_dir}' 폴더를 찾을 수 없습니다. 폴더명을 다시 확인해주세요.")
-else:
-    file_list = [f for f in os.listdir(input_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+# 폴더 초기화
+if os.path.exists(OUTPUT_DIR):
+    shutil.rmtree(OUTPUT_DIR)
+os.makedirs(OUTPUT_DIR)
 
-    for file_name in file_list:
-        # 2. 파일명 분석 (D__1019_01_Fb.jpg -> ['D', '', '1019', '01', 'Fb.jpg'])
-        # 언더바가 두 개인 경우를 대비해 split('_') 결과에서 빈 문자열은 제외
-        parts = [p for p in file_name.split('_') if p]
+# 2. 전처리 파이프라인 (팀장님 가이드)
+def get_resnet_preprocess(size=224):
+    return T.Compose([
+        T.Resize((size, size)),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+def process_and_save():
+    preprocess = get_resnet_preprocess(size=IMG_SIZE)
+    
+    # 파일 목록 가져오기
+    files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    print(f"총 {len(files)}개의 파일을 처리합니다...")
+
+    for i, file_name in enumerate(files):
+        try:
+            # 파일명 분석 및 폴더 생성
+            parts = [p for p in file_name.split('_') if p]
+            label = parts[0]
+            label_dir = os.path.join(OUTPUT_DIR, label)
+            os.makedirs(label_dir, exist_ok=True)
+
+            # 이미지 로드 및 전처리
+            img_path = os.path.join(INPUT_DIR, file_name)
+            image = Image.open(img_path).convert('RGB')
+            processed_data = preprocess(image)
+
+            # [핵심] 실제 파일로 저장하는 로직
+            # Normalize된 이미지는 수치가 변해있으므로 시각화용으로 저장할 때는 주의가 필요하지만, 
+            # 일단 파일 생성을 확인하기 위해 저장합니다.
+            output_path = os.path.join(label_dir, file_name)
+            save_image(torch.as_tensor(processed_data), os.path.join(label_dir, file_name))
+            if (i + 1) % 50 == 0:
+                print(f"[{i + 1}/{len(files)}] 저장 완료...")
         
-        if len(parts) < 4:
-            continue
-            
-        data_type = parts[0]    # D, P, T 등
-        sample_id = parts[1]    # 1019, 0025 등
-        angle = parts[3].split('.')[0]  # Fb, L, F 등 (확장자 제거)
+        except Exception as e:
+            print(f"파일 처리 오류 ({file_name}): {e}")
 
-        # 3. 데이터 타입별 저장 폴더 생성 (예: ./processed_data/D/)
-        save_path = os.path.join(output_dir, data_type)
-        if not os.path.exists(save_path):
-            os.makedirs(save_path)
+    print(f"✅ 모든 데이터가 '{OUTPUT_DIR}' 폴더에 저장되었습니다!")
 
-        # 4. 이미지 처리
-        img = cv2.imread(os.path.join(input_dir, file_name))
-        if img is None: continue
-
-        # [전처리 예시: 정방형 리사이징 및 가우시안 블러로 노이즈 제거]
-        img_resized = cv2.resize(img, (512, 512))
-        # img_blurred = cv2.GaussianBlur(img_resized, (5, 5), 0)
-
-        # 5. 새로운 이름으로 저장 (혹은 원본 이름 유지)
-        # 예: D_1019_Fb_resized.jpg
-        new_name = f"{data_type}_{sample_id}_{angle}.jpg"
-        cv2.imwrite(os.path.join(save_path, new_name), img_resized)
-
-    print(f"총 {len(file_list)}개의 이미지 전처리가 완료되었습니다.")
+if __name__ == "__main__":
+    process_and_save()
