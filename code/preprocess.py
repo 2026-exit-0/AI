@@ -58,3 +58,6 @@ def process_and_save():
 
 if __name__ == "__main__":
     process_and_save()
+
+
+# 커밋 시 issue 작업 내역 자동 링크 확인용 주석입니다.
