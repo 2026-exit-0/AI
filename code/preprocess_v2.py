@@ -1,3 +1,4 @@
+# issue 기록 남기기 주석(dacb7239103f0bffa4edd4fd7d4c4685bd795e55)
 import os
 import cv2
 import shutil
