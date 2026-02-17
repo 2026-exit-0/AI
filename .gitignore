@@ -1,20 +1,43 @@
-# 가상 환경
-venv/
-.venv/
-env/
+### Data and Models ###
+# AI Hub 피부 이미지 데이터셋 (용량 문제 및 보안)
+data/
+datasets/
+*.jpg
+*.jpeg
+*.png
+*.gif
 
-# 파이썬 캐시 파일
+# 학습된 모델 가중치 파일 (용량 큼)
+*.pt
+*.pth
+*.pkl
+*.h5
+outputs/
+checkpoints/
+
+### Python ###
 __pycache__/
 *.py[cod]
+*$py.class
+.env
+.venv/
+env/
+venv/
+ENV/
+
+### IDE and System ###
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+### Logs and Visualization ###
+logs/
+*.log
+runs/
+.ipynb_checkpoints
 
 # 이미지 데이터 (데이터셋은 보통 로컬에 두고 코지만 관리)
 data_sbP/
 preprocessed_images/
 processed_data/
-
-# 운영체제 관련 파일
-.DS_Store
-Thumbs.db
-
-# VS Code 설정 관련
-.vscode/
