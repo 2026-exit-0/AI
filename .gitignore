@@ -1,0 +1,38 @@
+### Data and Models ###
+# AI Hub 피부 이미지 데이터셋 (용량 문제 및 보안)
+data/
+datasets/
+*.jpg
+*.jpeg
+*.png
+*.gif
+
+# 학습된 모델 가중치 파일 (용량 큼)
+*.pt
+*.pth
+*.pkl
+*.h5
+outputs/
+checkpoints/
+
+### Python ###
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+ENV/
+
+### IDE and System ###
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+### Logs and Visualization ###
+logs/
+*.log
+runs/
+.ipynb_checkpoints
