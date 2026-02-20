@@ -1,0 +1,50 @@
+# 데이터 폴더 전체 무시
+AI/data/
+
+# 혹시 몰라 이미지 확장자도 무시
+*.jpg
+*.jpeg
+*.png
+*.bmp
+
+# 파이썬 캐시
+*.pyc
+
+# 가상환경
+venv/
+.env
+
+# VSCode
+.vscode/
+
+### Data and Models ###
+data/
+datasets/
+*.jpg
+*.jpeg
+*.png
+*.gif
+
+*.pt
+*.pth
+*.pkl
+*.h5
+outputs/
+checkpoints/
+
+### Python ###
+__pycache__/
+*.py[cod]
+.env
+.venv
+env/
+venv/
+
+### IDE ###
+.vscode/
+.idea/
+
+### Logs ###
+logs/
+runs/
+.ipynb_checkpoints
