@@ -27,3 +27,15 @@ def get_resnet_preprocess(size=224, is_training=True):
     ])
     
     return T.Compose(transforms)
+
+if __name__ == "__main__":
+    # 작성한 전처리 함수 불러오기
+  preprocess = get_resnet_preprocess(size=224, is_training=True)
+  print("전처리 파이프라인이 성공적으로 생성되었습니다!")
+    
+    # 실제 이미지 하나 테스트해보기 (경로는 본인 데이터 하나로 수정)
+    # from PIL import Image
+    # img = Image.open("../data/train/sample_image.jpg")
+    # result = preprocess(img)
+    # print(f"전처리 후 텐서 크기: {result.shape}") 
+    # 결과가 torch.Size([3, 224, 224])로 나오면 완벽!
