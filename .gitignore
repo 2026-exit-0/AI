@@ -6,6 +6,7 @@ datasets/
 *.jpeg
 *.png
 *.gif
+*.json
 
 # 학습된 모델 가중치 파일 (용량 큼)
 *.pt
