@@ -5,14 +5,21 @@ import numpy as np
 from tqdm import tqdm
 
 def process_damda_dataset(img_dir, label_root, output_root):
+    if not os.path.exists(img_dir):
+        print(f"오류: 이미지 폴더를 찾을 수 없습니다 -> {img_dir}")
+        return
+
     image_files = [f for f in os.listdir(img_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
     os.makedirs(output_root, exist_ok=True)
     
     device_map = {'D': '1. 디지털카메라', 'T': '2. 스마트패드', 'P': '3. 스마트폰'}
     success_count = 0
 
+    # --- 전처리 설정 값 ---
+    TARGET_SIZE = 512  # 해상도를 512로 상향하여 특징 보존
+    JPEG_QUALITY = 95  # 저장 품질 설정
+
     for filename in tqdm(image_files):
-        # 디버깅을 위해 try-except를 제거하거나 에러를 명시적으로 출력합니다.
         pure_name = os.path.splitext(filename)[0]
         parts = [p for p in pure_name.split('_') if p]
         
@@ -25,7 +32,7 @@ def process_damda_dataset(img_dir, label_root, output_root):
         device_folder = device_map.get(device_code)
         subject_folder_path = os.path.join(label_root, device_folder, subject_id)
         
-        # JSON 찾기
+        # JSON 찾기 로직
         match_pattern = f"{subject_id}_{session_id}"
         target_json_path = None
         if os.path.exists(subject_folder_path):
@@ -36,56 +43,71 @@ def process_damda_dataset(img_dir, label_root, output_root):
         
         if not target_json_path: continue
 
-        # --- 이 부분에서 에러가 날 확률이 높습니다 ---
-        with open(target_json_path, "r", encoding='utf-8') as f:
-            anno = json.load(f)
-
-        # JSON 구조 확인을 위한 출력 (첫 번째 파일만)
-        if success_count == 0:
-            print(f"\n[JSON 구조 확인]: {anno.keys()}")
-            # 만약 여기서 에러가 난다면 info를 찾는 방식이 틀린 것입니다.
-
-        # AI Hub 데이터셋 버전에 따라 구조가 다를 수 있음
         try:
-            # 보통 'images' 혹은 'annotations' 안에 데이터가 있습니다.
+            with open(target_json_path, "r", encoding='utf-8') as f:
+                anno = json.load(f)
+
+            # 데이터 구조 선택
             if "images" in anno:
                 info = anno["images"]
             else:
-                info = anno["annotations"][0] # 리스트 형태일 경우
+                info = anno["annotations"][0]
 
-            bbox = list(map(int, info["bbox"])) # 여기서 에러 발생 가능성
+            bbox = list(map(int, info["bbox"]))
             facepart = str(info.get("facepart", "00")).zfill(2)
 
-            # 이미지 로드 및 전처리
+            # 1. 이미지 로드 (한글 경로 대응)
             img_path = os.path.join(img_dir, filename)
             img_array = np.fromfile(img_path, np.uint8)
             img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-            
-            # 크롭 및 저장
+            if img is None: continue
+
+            # 2. 크롭 영역 계산 (Bbox보다 약간 여유 있게)
             x1, y1, x2, y2 = bbox
+            w, h = x2 - x1, y2 - y1
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-            crop_len = max(x2 - x1, y2 - y1) // 2
+            crop_len = int(max(w, h) * 0.55) # 맥락 보존을 위해 10% 추가 마진
+            
             y_min, y_max = max(cy - crop_len, 0), min(cy + crop_len, img.shape[0])
             x_min, x_max = max(cx - crop_len, 0), min(cx + crop_len, img.shape[1])
             cropped = img[y_min:y_max, x_min:x_max]
 
-            # (중략: CLAHE 및 리사이즈 로직 동일)
-            resized = cv2.resize(cropped, (224, 224))
-            
+            # 3. 고화질 리사이즈 (Lanczos 보간법 사용)
+            resized = cv2.resize(cropped, (TARGET_SIZE, TARGET_SIZE), interpolation=cv2.INTER_LANCZOS4)
+
+            # 4. 피부 특징 강조 (Sharpening)
+            # 미세 요철 및 모공 경계선을 뚜렷하게 만듦
+            gaussian = cv2.GaussianBlur(resized, (0, 0), 2.0)
+            sharpened = cv2.addWeighted(resized, 1.5, gaussian, -0.5, 0)
+
+            # 5. 대비 강조 (CLAHE)
+            # 조명 불균형을 해소하고 피부 질감을 극대화
+            lab = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+            l_final = clahe.apply(l)
+            enhanced = cv2.cvtColor(cv2.merge((l_final, a, b)), cv2.COLOR_LAB2BGR)
+
+            # 6. 저장 (한글 경로 대응 및 고품질 압축)
             save_dir = os.path.join(output_root, facepart)
             os.makedirs(save_dir, exist_ok=True)
-            cv2.imwrite(os.path.join(save_dir, f"{pure_name}.jpg"), resized)
+            save_path = os.path.join(save_dir, f"{pure_name}_v2.jpg")
             
-            success_count += 1
+            is_success, buffer = cv2.imencode(".jpg", enhanced, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+            if is_success:
+                with open(save_path, "wb") as f:
+                    f.write(buffer)
+                success_count += 1
+
         except Exception as e:
             print(f"\n[데이터 처리 에러] 파일명: {filename} | 에러내용: {e}")
-            # 에러 원인을 알기 위해 한 번만 출력하고 멈추려면 아래 break를 쓰세요
-            # break 
 
     print(f"\n최종 성공: {success_count}개")
 
 if __name__ == "__main__":
+    # 사용자 환경 경로 (OneDrive 경로 직접 지정)
     img_p = r"C:\Users\YSB\OneDrive\Desktop\pre_images"
     lbl_p = r"C:\Users\YSB\OneDrive\Desktop\TL"
-    out_p = r"C:\Users\YSB\OneDrive\Desktop\damda_processed_data"
+    out_p = r"C:\Users\YSB\OneDrive\Desktop\damda_processed_data_highres"
+    
     process_damda_dataset(img_p, lbl_p, out_p)
