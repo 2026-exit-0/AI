@@ -17,7 +17,7 @@ def mkdir(path):
             raise
 
 
-folder_path = f"dataset/label"   # Dataset dir path
+folder_path = f"data/label"   # Dataset dir path
 for equ in os.listdir(folder_path):
     equ_path = os.path.join(folder_path, equ)
     for sub in tqdm(os.listdir(equ_path)):
@@ -26,13 +26,13 @@ for equ in os.listdir(folder_path):
             anno_f_path = os.path.join(sub_path, anno_path)
             with open(anno_f_path, "r") as f:
                 anno = json.load(f)
-                img = cv2.imread(os.path.join("dataset/img", equ, sub, anno["info"]["filename"]))
+                img = cv2.imread(os.path.join("data/img", equ, sub, anno["info"]["filename"]))
                 if anno["images"]["bbox"] == None: continue
                 bbox = list(map(int, anno["images"]["bbox"]))
                 
                 center_bbox = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]
                 center_bbox = list(map(int, center_bbox))
-                mkdir(os.path.join("dataset/cropped_img", equ, sub))
+                mkdir(os.path.join("data/cropped_img", equ, sub))
                 
                 if anno["images"]["facepart"] == 0:
                     cropped_img = img
@@ -42,4 +42,4 @@ for equ in os.listdir(folder_path):
                     cropped_img = img[max(center_bbox[1] - crop_length, 0) : min(center_bbox[1] + crop_length, img.shape[0]), max(center_bbox[0] - crop_length, 0) : min(center_bbox[0] + crop_length, img.shape[1])]
                 
                 resized_img = cv2.resize(cropped_img, (256, 256))
-                cv2.imwrite(os.path.join("dataset/cropped_img", equ, sub, anno["info"]["filename"][:-4] + f'_{str(anno["images"]["facepart"]).zfill(2)}' + '.jpg'), resized_img)
+                cv2.imwrite(os.path.join("data/cropped_img", equ, sub, anno["info"]["filename"][:-4] + f'_{str(anno["images"]["facepart"]).zfill(2)}' + '.jpg'), resized_img)

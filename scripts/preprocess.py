@@ -10,8 +10,8 @@ from torchvision.utils import save_image
 # ===============================
 # 1. 경로 설정
 # ===============================
-INPUT_DIR = "./dataset/cropped_img"   # 256x256 bbox 결과
-OUTPUT_DIR = "./dataset/final_processed"
+INPUT_DIR = "./data/cropped_img"   # 256x256 bbox 결과
+OUTPUT_DIR = "./data/final_processed"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 PATCH_SIZE = 224
@@ -40,6 +40,7 @@ def apply_mild_clahe(img_rgb):
 # ===============================
 # 4. 메인 루프
 # ===============================
+# 하위 폴더까지 재귀 순회
 for root, dirs, files in os.walk(INPUT_DIR):
 
     for file in tqdm(files):
