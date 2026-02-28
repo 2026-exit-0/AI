@@ -42,3 +42,7 @@ runs/
 data_sbP/
 preprocessed_images/
 processed_data/
+
+# 개인 테스트용 파일
+sbP_count_file.py
+sbP_gpu_test.py
