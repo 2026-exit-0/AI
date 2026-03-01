@@ -124,8 +124,8 @@ def plot_metrics(loss_hist, mae_hist):
 def train_baseline():
 # ⭐ CPU에서 CUDA(GPU)로 변경! 
     # 사용 가능할 때만 CUDA를 쓰고, 아니면 CPU로 자동 전환되는 안전한 코드입니다.
-    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device("cpu") # 에러 안나는지 한번씩 확인해보기_sbP
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cpu") # 에러 안나는지 한번씩 확인해보기_sbP
     
     print(f"🚀 학습 시작! 사용 기기: {device}")
     if device.type == 'cuda':
