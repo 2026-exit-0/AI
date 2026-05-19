@@ -1,0 +1,264 @@
+"""학습 루프.
+
+사용 예:
+  # Baseline Validation (500장 / 10 epoch)
+  python -m src.train --config configs/baseline.yaml --validation-mode
+  # 본 학습
+  python -m src.train --config configs/baseline.yaml
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import os
+from pathlib import Path
+from typing import Dict
+
+import pandas as pd
+import torch
+import yaml
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
+
+from .dataset import (
+    DamdaSkinDataset,
+    collate_fn,
+    compute_regression_stats,
+    split_manifest,
+)
+from .losses import multitask_loss
+from .model import DamdaSkinModel
+from .utils import device_supports_amp, get_device, set_seed, setup_logger
+
+
+# ---------------- Helpers ----------------
+
+def load_config(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def make_optimizer(model: torch.nn.Module, cfg: dict) -> torch.optim.Optimizer:
+    name = cfg["training"]["optimizer"].lower()
+    lr = cfg["training"]["lr"]
+    wd = cfg["training"].get("weight_decay", 0.0)
+    if name == "adam":
+        return torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+    if name == "adamw":
+        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+    if name == "sgd":
+        return torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=wd)
+    raise ValueError(name)
+
+
+def make_scheduler(optimizer, cfg: dict, num_epochs: int):
+    name = cfg["training"].get("scheduler", "none").lower()
+    if name == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+    if name == "step":
+        return torch.optim.lr_scheduler.StepLR(optimizer, step_size=max(num_epochs // 3, 1), gamma=0.5)
+    return None
+
+
+# ---------------- Loops ----------------
+
+def train_one_epoch(model, loader, optimizer, scaler, device, cfg, writer, global_step, epoch):
+    model.train()
+    use_amp = scaler is not None
+    pbar = tqdm(loader, desc=f"[train ep{epoch}]", ncols=100)
+    for batch in pbar:
+        batch = move_to_device(batch, device)
+        optimizer.zero_grad(set_to_none=True)
+
+        if use_amp:
+            with torch.cuda.amp.autocast(enabled=True):
+                out = model(batch["image"], batch["region_id"])
+                loss, info = multitask_loss(
+                    out, batch,
+                    regression_weight=cfg["training"]["regression_weight"],
+                    classification_weight=cfg["training"]["classification_weight"],
+                )
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            out = model(batch["image"], batch["region_id"])
+            loss, info = multitask_loss(
+                out, batch,
+                regression_weight=cfg["training"]["regression_weight"],
+                classification_weight=cfg["training"]["classification_weight"],
+            )
+            loss.backward()
+            optimizer.step()
+
+        if writer is not None:
+            for k, v in info.items():
+                writer.add_scalar(f"train/{k}", v, global_step)
+        pbar.set_postfix(loss=f"{info['loss/total']:.4f}")
+        global_step += 1
+    return global_step
+
+
+@torch.no_grad()
+def evaluate(model, loader, device, cfg, writer, epoch, tag: str = "val"):
+    model.eval()
+    total_losses: Dict[str, float] = {}
+    n = 0
+    for batch in tqdm(loader, desc=f"[{tag} ep{epoch}]", ncols=100):
+        batch = move_to_device(batch, device)
+        out = model(batch["image"], batch["region_id"])
+        _, info = multitask_loss(
+            out, batch,
+            regression_weight=cfg["training"]["regression_weight"],
+            classification_weight=cfg["training"]["classification_weight"],
+        )
+        for k, v in info.items():
+            total_losses[k] = total_losses.get(k, 0.0) + v
+        n += 1
+
+    avg = {k: v / max(n, 1) for k, v in total_losses.items()}
+    if writer is not None:
+        for k, v in avg.items():
+            writer.add_scalar(f"{tag}/{k}", v, epoch)
+    return avg
+
+
+def move_to_device(batch: dict, device) -> dict:
+    out = {}
+    for k, v in batch.items():
+        if torch.is_tensor(v):
+            out[k] = v.to(device, non_blocking=True)
+        elif isinstance(v, dict):
+            out[k] = {kk: vv.to(device, non_blocking=True) if torch.is_tensor(vv) else vv
+                      for kk, vv in v.items()}
+        else:
+            out[k] = v
+    return out
+
+
+# ---------------- Main ----------------
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", type=str, required=True)
+    ap.add_argument("--validation-mode", action="store_true",
+                    help="Baseline Validation: 소규모(500장) × 짧은 epoch으로 학습 가능성 검증")
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+    set_seed(cfg.get("seed", 42))
+    device = get_device()
+
+    out_dir = Path(cfg["logging"]["output_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = Path(cfg["logging"]["log_dir"]) / ("baseline_val" if args.validation_mode else "main")
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    logger = setup_logger("train", str(log_dir))
+    writer = SummaryWriter(str(log_dir))
+    logger.info(f"device={device}, validation_mode={args.validation_mode}")
+
+    # ----- Data -----
+    manifest_path = cfg["data"]["manifest_path"]
+    if not os.path.exists(manifest_path):
+        raise FileNotFoundError(f"manifest 없음: {manifest_path}. 먼저 build_manifest.py 를 실행하세요.")
+    df = pd.read_csv(manifest_path)
+    logger.info(f"manifest 로드: {len(df)}행")
+
+    if args.validation_mode:
+        max_s = cfg["validation_mode"]["max_samples"]
+        df = df.sample(n=min(max_s, len(df)), random_state=cfg.get("seed", 42)).reset_index(drop=True)
+        logger.info(f"validation-mode 활성화 → 샘플 {len(df)}개로 축소")
+
+    train_df, val_df, test_df = split_manifest(
+        df,
+        val_split=cfg["data"]["val_split"],
+        test_split=cfg["data"]["test_split"],
+        seed=cfg.get("seed", 42),
+        split_by=cfg["data"].get("split_by", "id"),
+    )
+    logger.info(f"split: train={len(train_df)} / val={len(val_df)} / test={len(test_df)}")
+
+    model_cfg = cfg["model"]
+    regression_targets = model_cfg["regression_targets"]
+    classification_heads = model_cfg["classification_heads"]
+
+    # 회귀 타겟 정규화 통계 — 학습셋에서만 계산해 train/val 공유
+    regression_stats = compute_regression_stats(train_df, regression_targets)
+    logger.info("회귀 정규화 통계 (학습셋 기준):")
+    for col, s in regression_stats.items():
+        logger.info(f"  {col:22s} mean={s['mean']:.3f}  std={s['std']:.3f}")
+
+    train_ds = DamdaSkinDataset(train_df, regression_targets, classification_heads,
+                                image_size=cfg["data"]["image_size"], train=True,
+                                regression_stats=regression_stats)
+    val_ds   = DamdaSkinDataset(val_df,   regression_targets, classification_heads,
+                                image_size=cfg["data"]["image_size"], train=False,
+                                regression_stats=regression_stats)
+
+    pin = device.type == "cuda"
+    train_loader = DataLoader(train_ds, batch_size=cfg["training"]["batch_size"],
+                              shuffle=True, num_workers=cfg["data"]["num_workers"],
+                              collate_fn=collate_fn, pin_memory=pin)
+    val_loader   = DataLoader(val_ds, batch_size=cfg["training"]["batch_size"],
+                              shuffle=False, num_workers=cfg["data"]["num_workers"],
+                              collate_fn=collate_fn, pin_memory=pin)
+
+    # ----- Model -----
+    model = DamdaSkinModel(
+        backbone=model_cfg["backbone"],
+        pretrained=model_cfg["pretrained"],
+        num_regions=model_cfg["num_regions"],
+        region_emb_dim=model_cfg["region_emb_dim"],
+        regression_targets=regression_targets,
+        classification_heads=classification_heads,
+        dropout=model_cfg.get("dropout", 0.2),
+        sensor_dim=0,  # Phase 1: 센서 없음
+    ).to(device)
+    logger.info(f"model params: {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
+
+    optimizer = make_optimizer(model, cfg)
+    num_epochs = cfg["validation_mode"]["epochs"] if args.validation_mode else cfg["training"]["epochs"]
+    scheduler = make_scheduler(optimizer, cfg, num_epochs)
+
+    # AMP는 CUDA 환경에서만
+    use_amp = cfg["training"].get("amp", True) and device_supports_amp(device)
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    if not use_amp and device.type != "cuda":
+        logger.info("AMP 비활성화 (CUDA 외 환경)")
+
+    # ----- Train -----
+    best_val = math.inf
+    global_step = 0
+    for epoch in range(1, num_epochs + 1):
+        global_step = train_one_epoch(
+            model, train_loader, optimizer, scaler, device, cfg, writer, global_step, epoch,
+        )
+        val_metrics = evaluate(model, val_loader, device, cfg, writer, epoch, tag="val")
+        logger.info(f"[epoch {epoch}] val total={val_metrics.get('loss/total', 0):.4f}")
+
+        if scheduler is not None:
+            scheduler.step()
+
+        save_every = cfg["logging"].get("save_every", 5)
+        if epoch % save_every == 0 or val_metrics.get("loss/total", math.inf) < best_val:
+            ckpt_path = out_dir / f"epoch{epoch:03d}.pt"
+            torch.save({
+                "epoch": epoch,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "val_metrics": val_metrics,
+                "config": cfg,
+                "regression_stats": regression_stats,
+            }, ckpt_path)
+            logger.info(f"체크포인트 저장: {ckpt_path}")
+            best_val = min(best_val, val_metrics.get("loss/total", math.inf))
+
+    logger.info(f"학습 완료. best val loss = {best_val:.4f}")
+    writer.close()
+
+
+if __name__ == "__main__":
+    main()
