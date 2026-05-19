@@ -1,0 +1,74 @@
+# damda AI Baseline 학습 설정
+
+seed: 42
+
+# ===== Data =====
+data:
+  manifest_path: data/manifest.csv
+  image_size: 224         # ResNet-50 표준 입력 크기 (VRAM 부족 시 192)
+
+#파이프라인 검증용 미니세트 대상(후에 주석처리된 코드로 되돌리기)
+  val_split: 0.20      # 0.15 → 0.20 (val 샘플 늘리기)
+  test_split: 0.0      # 0.10 → 0.0 (지금 단계엔 test 불필요, train·val에 모두 투입)
+  num_workers: 0       # 작은 데이터셋이면 worker 0이 오히려 빠를 수 있음 (Windows)
+  # num_workers: 2          # 노트북 기준. CPU 코어 많으면 4로
+  # val_split: 0.15
+  # test_split: 0.10
+
+
+  split_by: id            # 'id' (대상자 단위) | 'random' (이미지 단위). 대상자 단위 권장.
+
+# ===== Model =====
+model:
+  backbone: resnet50
+  pretrained: true
+  region_emb_dim: 16
+  num_regions: 9          # PART_0, FOREHEAD, GLABELLA, L_EYE, R_EYE, L_CHEEK, R_CHEEK, LIP, CHIN
+  dropout: 0.2
+
+  regression_targets:
+    - moisture
+    - elasticity_mean
+    - pore_value
+    - pigmentation_value
+    - wrinkle_value
+
+  # 클래스 수는 manifest 빌드 후 실제 unique 값으로 확정
+  classification_heads:
+    # 클래스 수는 manifest의 라벨 unique 값 기준 (최댓값 + 1)
+    wrinkle_grade: 7        # 실측: 0~6
+    pigmentation_grade: 6   # 실측: 0~5
+    pore_grade: 6           # 실측: 0~5
+    dryness_grade: 5        # 실측: 0~4
+    sagging_grade: 7        # 실측: 0~6
+    skin_type: 6            # 실측: 0,1,3,4,5 — 2 누락이지만 max=5 → 6클래스로 잡음
+    sensitive: 2            # binary (0/1) — 민감성 헤드 추가
+
+# ===== Training =====
+training:
+  epochs: 30
+  batch_size: 8
+  #batch_size: 16          # 노트북 GPU 4~6GB VRAM 기준. CUDA 12GB+ 면 32 가능
+  optimizer: adam
+  lr: 0.001
+  weight_decay: 0.0001
+  scheduler: cosine       # cosine | step | none
+  warmup_epochs: 1
+
+  regression_weight: 1.0
+  classification_weight: 0.5
+
+  amp: true               # CUDA 환경에서만 자동 활성화. MPS/CPU는 무시.
+
+# ===== Validation mode (--validation-mode) =====
+validation_mode:
+  max_samples: 500
+  epochs: 5
+  #epochs: 10
+  log_every: 5            # batches
+
+# ===== Logging =====
+logging:
+  output_dir: checkpoints
+  log_dir: runs
+  save_every: 5           # epochs
