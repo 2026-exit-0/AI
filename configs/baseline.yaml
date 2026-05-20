@@ -61,4 +61,4 @@ validation_mode:
 logging:
   output_dir: checkpoints
   log_dir: runs
-  save_every: 5           # epochs
+  save_every: 1           # 매 epoch 저장 (야간 학습 안전성)
