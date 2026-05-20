@@ -1,29 +1,64 @@
+# damda AI Baseline 학습 설정 (GPU 환경)
+
+seed: 42
+
+# ===== Data =====
 data:
   manifest_path: data/manifest.csv
   image_size: 224
-  num_workers: 4         # 0 → 4 (졸프실 PC CPU 코어 활용)
-  val_split: 0.15        # 0.20 → 0.15 (큰 데이터엔 15%로 충분)
-  test_split: 0.10       # 0.0 → 0.10 (test set 복원)
-  split_by: id
+  num_workers: 4
+  val_split: 0.15
+  test_split: 0.10
+  split_by: id            # 'id' (대상자 단위) — 같은 사람이 train/val 섞이지 않음
 
+# ===== Model =====
+model:
+  backbone: resnet50
+  pretrained: true
+  region_emb_dim: 16
+  num_regions: 9          # PART_0, FOREHEAD, GLABELLA, L_EYE, R_EYE, L_CHEEK, R_CHEEK, LIP, CHIN
+  dropout: 0.2
+
+  regression_targets:
+    - moisture
+    - elasticity_mean
+    - pore_value
+    - pigmentation_value
+    - wrinkle_value
+
+  # 클래스 수는 manifest의 라벨 unique 값 기준 (max + 1)
+  classification_heads:
+    wrinkle_grade: 7        # 0~6
+    pigmentation_grade: 6   # 0~5
+    pore_grade: 6           # 0~5
+    dryness_grade: 5        # 0~4
+    sagging_grade: 7        # 0~6
+    skin_type: 6            # 0~5
+    sensitive: 2            # binary
+
+# ===== Training =====
 training:
   epochs: 30
-  batch_size: 16         # 8 → 16 (RTX 5060 8GB 기준 안전치)
+  batch_size: 16          # RTX 5060 8GB VRAM 기준 안전치 (OOM 시 12 또는 8로)
   optimizer: adam
   lr: 0.001
   weight_decay: 0.0001
-  scheduler: cosine
+  scheduler: cosine       # cosine | step | none
   warmup_epochs: 1
+
   regression_weight: 1.0
   classification_weight: 0.5
-  amp: true              # CUDA에서 자동 활성화
 
+  amp: true               # CUDA에서 자동 활성화. MPS/CPU는 무시.
+
+# ===== Validation mode (--validation-mode) =====
 validation_mode:
-  max_samples: 2000      # 500 → 2000 (GPU 빠르니 더 큰 검증)
-  epochs: 10             # 5 → 10
+  max_samples: 2000
+  epochs: 10
   log_every: 5
 
+# ===== Logging =====
 logging:
   output_dir: checkpoints
   log_dir: runs
-  save_every: 5
+  save_every: 5           # epochs
