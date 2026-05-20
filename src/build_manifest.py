@@ -1,27 +1,33 @@
-"""원본 이미지 + AI-Hub JSON 라벨을 단일 manifest.csv로 정규화.
+"""AI-Hub 원본 이미지 + JSON 라벨을 단일 manifest.csv로 정규화.
 
-데이터 구조:
-  pre_images/
-    D__0002_01_L15.jpg          ← 원본 얼굴 이미지 (전체 얼굴)
-    P__0016_03_F.jpg
-    ...
-  TL/
+AI-Hub 표준 계층 구조 (Training/Validation 동일):
+  <image_root>/                       (예: Training/01.원천데이터/TS)
     1. 디지털카메라/
       0002/
-        0002_01_L15_00.json     ← facepart 0 (전체)
-        0002_01_L15_01.json     ← facepart 1 (이마)
+        0002_01_F.jpg
+        0002_01_L15.jpg
         ...
-        0002_01_L15_08.json     ← facepart 8 (턱)
+      0003/
+      ...
     2. 스마트패드/
     3. 스마트폰/
 
-각 원본 이미지는 9개 facepart JSON과 매칭되어 manifest의 9개 행을 만든다.
-각 행은 (이미지 경로, bbox, 부위, 라벨...)을 포함하여 학습 시점에 bbox로 잘라 쓴다.
+  <json_root>/                        (예: Training/02.라벨링데이터/TL)
+    1. 디지털카메라/
+      0002/
+        0002_01_F_00.json   ← facepart 0 (전체)
+        0002_01_F_01.json   ← facepart 1 (이마)
+        ...
+        0002_01_F_08.json   ← facepart 8 (턱)
+    ...
+
+이미지 1장은 9개 facepart JSON과 매칭되어 manifest 9행 생성.
+각 행은 (이미지 경로, bbox, 부위, 라벨)을 포함, 학습 시점에 bbox로 crop.
 
 사용 예:
   python -m src.build_manifest ^
-      --image-root "C:\\Users\\YSB\\OneDrive\\Desktop\\pre_images" ^
-      --json-root  "C:\\Users\\YSB\\OneDrive\\Desktop\\TL" ^
+      --image-root "C:\\damda\\dataset\\028...\\Training\\01.원천데이터\\TS" ^
+      --json-root  "C:\\damda\\dataset\\028...\\Training\\02.라벨링데이터\\TL" ^
       --output     data\\manifest.csv
 """
 
@@ -29,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -37,17 +42,23 @@ import pandas as pd
 from tqdm import tqdm
 
 from .utils import (
-    DEVICE_TO_TL_FOLDER,
     REGION_TO_ID,
     REGION_TO_JSON_PREFIX,
     setup_logger,
 )
 
-# 파일명 패턴: D__0002_01_L15.jpg 또는 P__0016_03_F.jpg
-FILENAME_PATTERN = re.compile(
-    r"^([DPT])__(\d+)_(\d+)_([A-Za-z0-9]+)\.jpe?g$",
-    re.IGNORECASE,
-)
+# 폴더명 → device 문자 매핑
+# AI-Hub 폴더는 "1. 디지털카메라", "2. 스마트패드", "3. 스마트폰" 형태
+def folder_to_device_char(folder_name: str) -> Optional[str]:
+    name = folder_name.strip()
+    if "디지털카메라" in name or name.startswith("1"):
+        return "D"
+    if "스마트패드" in name or name.startswith("2"):
+        return "T"
+    if "스마트폰" in name or name.startswith("3"):
+        return "P"
+    return None
+
 
 # facepart 번호 → 부위명 (REGION_TO_ID와 정합)
 FACEPART_NUM_TO_REGION = {
@@ -85,7 +96,7 @@ def _try_keys(d: dict, *keys: str) -> Optional[float]:
 
 
 def _gather_elasticity_mean(equipment: dict, prefix: str) -> Optional[float]:
-    """탄력 R0~R9 평균. prefix 가 비면 그냥 elasticity_R0 부터 시도."""
+    """탄력 R0~R9 평균."""
     vals = []
     for i in range(10):
         key = f"{prefix}_elasticity_R{i}" if prefix else f"elasticity_R{i}"
@@ -95,40 +106,56 @@ def _gather_elasticity_mean(equipment: dict, prefix: str) -> Optional[float]:
 
 
 def _parse_bbox(bbox) -> tuple:
-    """bbox 형식 정규화 — [x1,y1,x2,y2] 또는 dict 모두 지원."""
     if isinstance(bbox, list) and len(bbox) == 4:
         return tuple(bbox)
     if isinstance(bbox, dict):
-        x = bbox.get("x", 0)
-        y = bbox.get("y", 0)
-        w = bbox.get("w", 0)
-        h = bbox.get("h", 0)
+        x = bbox.get("x", 0); y = bbox.get("y", 0)
+        w = bbox.get("w", 0); h = bbox.get("h", 0)
         return (x, y, x + w, y + h)
     return (None, None, None, None)
 
 
-def process_one_image(img_path: Path, json_root: Path):
-    """원본 이미지 1장 → 최대 9개 manifest 행 반환 (facepart별)."""
-    m = FILENAME_PATTERN.match(img_path.name)
-    if not m:
+def process_one_image(
+    img_path: Path,
+    image_root: Path,
+    json_root: Path,
+):
+    """이미지 1장 → 최대 9개 manifest 행 반환 (facepart별).
+
+    image_root 기준 상대경로에서 device 폴더와 subject ID 추출:
+      image_root/{device_folder}/{subject_id}/{filename}.jpg
+    """
+    try:
+        rel = img_path.relative_to(image_root)
+    except ValueError:
+        return []
+    parts = rel.parts  # (device_folder, subject_id, filename)
+    if len(parts) < 3:
         return []
 
-    device_char = m.group(1).upper()
-    subject_id  = m.group(2)   # "0002"
-    sub_idx     = m.group(3)   # "01" / "02" / "03"
-    angle       = m.group(4)   # "F", "Fb", "Ft", "L15", "L30", "R15", "R30", "L", "R"
+    device_folder = parts[0]
+    subject_id    = parts[1]
+    filename      = parts[-1]
+    stem          = Path(filename).stem  # "0002_01_F"
 
-    tl_folder_name = DEVICE_TO_TL_FOLDER.get(device_char)
-    if tl_folder_name is None:
+    device_char = folder_to_device_char(device_folder)
+    if device_char is None:
         return []
 
-    json_dir = json_root / tl_folder_name / subject_id
+    # 파일명에서 angle 추출 — "{ID}_{sub}_{angle}" 형식
+    name_parts = stem.split("_")
+    if len(name_parts) < 3:
+        return []
+    angle = "_".join(name_parts[2:])
+
+    # JSON 경로: json_root/{device_folder}/{subject_id}/{stem}_{NN}.json
+    json_dir = json_root / device_folder / subject_id
     if not json_dir.exists():
         return []
 
     rows = []
     for facepart_num in range(9):
-        json_path = json_dir / f"{subject_id}_{sub_idx}_{angle}_{facepart_num:02d}.json"
+        json_path = json_dir / f"{stem}_{facepart_num:02d}.json"
         if not json_path.exists():
             continue
 
@@ -139,20 +166,18 @@ def process_one_image(img_path: Path, json_root: Path):
             continue
 
         info        = obj.get("info", {})
-        images      = obj.get("images", {})
+        images_meta = obj.get("images", {})
         annotations = obj.get("annotations", {}) or {}
         equipment   = obj.get("equipment", {}) or {}
 
-        # JSON 내부 facepart로 부위명 확정 (파일명과 일치 검증 겸)
-        fp_in_json = images.get("facepart", facepart_num)
+        fp_in_json = images_meta.get("facepart", facepart_num)
         region = FACEPART_NUM_TO_REGION.get(int(fp_in_json))
         if region is None:
             continue
         prefix = REGION_TO_JSON_PREFIX.get(region, "")
 
-        bx1, by1, bx2, by2 = _parse_bbox(images.get("bbox"))
+        bx1, by1, bx2, by2 = _parse_bbox(images_meta.get("bbox"))
 
-        # 라벨 추출 (해당 부위 prefix로)
         def k(name: str) -> str:
             return f"{prefix}_{name}" if prefix else name
 
@@ -198,11 +223,13 @@ def process_one_image(img_path: Path, json_root: Path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image-root", type=str, required=True,
-                    help="pre_images 폴더 경로 (D__/T__/P__ 접두 jpg가 들어있는 곳)")
+                    help="이미지 루트 (예: Training/01.원천데이터/TS). "
+                         "하위에 device 폴더(1. 디지털카메라 등)가 있어야 함")
     ap.add_argument("--json-root", type=str, required=True,
-                    help="TL 폴더 경로 (1. 디지털카메라/ 등 하위)")
+                    help="JSON 라벨 루트 (예: Training/02.라벨링데이터/TL)")
     ap.add_argument("--output", type=str, default="data/manifest.csv")
-    ap.add_argument("--limit", type=int, default=0, help="개발용 이미지 수 제한 (0=전체)")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="개발용 이미지 수 제한 (0=전체)")
     args = ap.parse_args()
 
     logger = setup_logger("build_manifest")
@@ -211,15 +238,17 @@ def main():
     out_path   = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    images = sorted(image_root.glob("*.jpg")) + sorted(image_root.glob("*.jpeg"))
+    # 모든 device 폴더에서 재귀 이미지 검색
+    logger.info(f"이미지 검색 중: {image_root}")
+    images = sorted(image_root.rglob("*.jpg")) + sorted(image_root.rglob("*.jpeg"))
     if args.limit:
         images = images[: args.limit]
-    logger.info(f"이미지 {len(images)}개 처리 시작")
+    logger.info(f"이미지 {len(images)}개 발견. 매니페스트 생성 시작")
 
     rows = []
     miss_image = 0
     for img_path in tqdm(images):
-        new_rows = process_one_image(img_path, json_root)
+        new_rows = process_one_image(img_path, image_root, json_root)
         if not new_rows:
             miss_image += 1
             continue
@@ -230,7 +259,8 @@ def main():
     logger.info(
         f"manifest 저장: {out_path}\n"
         f"  - 처리된 이미지: {len(images) - miss_image} / {len(images)}\n"
-        f"  - 매니페스트 행 수: {len(df)}  (이미지당 평균 {len(df) / max(1, len(images) - miss_image):.1f} 부위)"
+        f"  - 매니페스트 행 수: {len(df)}  "
+        f"(이미지당 평균 {len(df) / max(1, len(images) - miss_image):.1f} 부위)"
     )
 
     if len(df) == 0:
