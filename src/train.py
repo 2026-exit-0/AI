@@ -140,11 +140,23 @@ def move_to_device(batch: dict, device) -> dict:
 
 # ---------------- Main ----------------
 
+def find_latest_checkpoint(out_dir: Path):
+    """checkpoints 폴더에서 가장 최근 epoch ckpt 반환 (없으면 None)."""
+    if not out_dir.exists():
+        return None
+    ckpts = sorted(out_dir.glob("epoch*.pt"))
+    return ckpts[-1] if ckpts else None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=str, required=True)
     ap.add_argument("--validation-mode", action="store_true",
                     help="Baseline Validation: 소규모(500장) × 짧은 epoch으로 학습 가능성 검증")
+    ap.add_argument("--resume", action="store_true",
+                    help="checkpoints 폴더에서 최신 ckpt 자동 탐지 후 이어 학습")
+    ap.add_argument("--resume-from", type=str, default="",
+                    help="특정 ckpt 파일에서 이어 학습 (예: checkpoints/epoch015.pt)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -229,10 +241,31 @@ def main():
     if not use_amp and device.type != "cuda":
         logger.info("AMP 비활성화 (CUDA 외 환경)")
 
+    # ----- Resume from checkpoint (if requested) -----
+    start_epoch = 1
+    resume_path = None
+    if args.resume_from:
+        resume_path = Path(args.resume_from)
+    elif args.resume:
+        resume_path = find_latest_checkpoint(out_dir)
+
+    if resume_path and resume_path.exists():
+        logger.info(f"재개 모드: {resume_path} 에서 이어 학습")
+        ckpt = torch.load(resume_path, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        start_epoch = int(ckpt.get("epoch", 0)) + 1
+        # regression_stats 복원 (동일 seed면 어차피 같지만 안전)
+        if "regression_stats" in ckpt:
+            train_ds.regression_stats = ckpt["regression_stats"]
+            val_ds.regression_stats = ckpt["regression_stats"]
+            regression_stats = ckpt["regression_stats"]
+        logger.info(f"resume 완료. epoch {start_epoch} 부터 진행")
+
     # ----- Train -----
     best_val = math.inf
     global_step = 0
-    for epoch in range(1, num_epochs + 1):
+    for epoch in range(start_epoch, num_epochs + 1):
         global_step = train_one_epoch(
             model, train_loader, optimizer, scaler, device, cfg, writer, global_step, epoch,
         )
