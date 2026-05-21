@@ -26,22 +26,56 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 def build_transforms(image_size: int = 224, train: bool = True) -> transforms.Compose:
     """ResNet-50 표준 전처리.
 
-    학습 시 약한 증강만 적용 (피부 색상·질감 변형은 최소화).
+    학습 시 중간 강도 증강 적용 — 피부 색감(hue/saturation)은 신호이므로 약하게,
+    공간 변형(rotation/crop/flip/erasing)은 일반화 강화에 도움이라 약간 강하게.
     """
     if train:
         return transforms.Compose([
-            transforms.Resize((image_size + 16, image_size + 16)),
+            transforms.Resize((image_size + 24, image_size + 24)),
             transforms.RandomCrop(image_size),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.05, hue=0.02),
+            transforms.RandomRotation(degrees=10),
+            transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.05, hue=0.02),
             transforms.ToTensor(),
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            transforms.RandomErasing(p=0.25, scale=(0.02, 0.10), ratio=(0.5, 2.0)),
         ])
     return transforms.Compose([
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
         transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
     ])
+
+
+def compute_class_weights(
+    df: pd.DataFrame,
+    classification_heads: Dict[str, int],
+    smooth: float = 0.1,
+    cap_ratio: float = 10.0,
+) -> Dict[str, torch.Tensor]:
+    """학습셋 분포 기반 분류 헤드별 클래스 가중치 (sklearn 'balanced' 방식).
+
+    공식: w_c = N / (K * (count_c + smooth))
+    매우 적은 클래스가 극단적 가중치를 받지 않도록 cap_ratio*mean 으로 제한.
+
+    반환: {head_name: tensor(K,)} — losses.py 의 multitask_loss(class_weights=...) 에 그대로 주입.
+    """
+    weights: Dict[str, torch.Tensor] = {}
+    for col, num_cls in classification_heads.items():
+        if col not in df.columns:
+            continue
+        counts = np.zeros(num_cls, dtype=np.float64)
+        for v in df[col].dropna():
+            idx = int(v)
+            if 0 <= idx < num_cls:
+                counts[idx] += 1
+        total = counts.sum()
+        if total == 0:
+            continue
+        w = total / (num_cls * (counts + smooth))
+        w = np.minimum(w, cap_ratio * w.mean())
+        weights[col] = torch.tensor(w, dtype=torch.float32)
+    return weights
 
 
 def compute_regression_stats(
