@@ -1,0 +1,135 @@
+[2026-05-20 20:26:59] INFO | device=cuda, validation_mode=False
+[2026-05-20 20:26:59] INFO | manifest 로드: 100386행
+[2026-05-20 20:26:59] INFO | split: train=75465 / val=14976 / test=9945
+[2026-05-20 20:26:59] INFO | 회귀 정규화 통계 (학습셋 기준):
+[2026-05-20 20:26:59] INFO |   moisture               mean=61.508  std=10.088
+[2026-05-20 20:26:59] INFO |   elasticity_mean        mean=0.304  std=0.027
+[2026-05-20 20:26:59] INFO |   pore_value             mean=906.515  std=462.225
+[2026-05-20 20:26:59] INFO |   pigmentation_value     mean=0.000  std=1.000
+[2026-05-20 20:26:59] INFO |   wrinkle_value          mean=0.000  std=1.000
+[2026-05-20 20:27:00] INFO | model params: 24.6M
+[2026-05-20 20:42:19] INFO | device=cuda, validation_mode=False
+[2026-05-20 20:42:19] INFO | manifest 로드: 100386행
+[2026-05-20 20:42:19] INFO | split: train=75465 / val=14976 / test=9945
+[2026-05-20 20:42:19] INFO | 회귀 정규화 통계 (학습셋 기준):
+[2026-05-20 20:42:19] INFO |   moisture               mean=61.508  std=10.088
+[2026-05-20 20:42:19] INFO |   elasticity_mean        mean=0.304  std=0.027
+[2026-05-20 20:42:19] INFO |   pore_value             mean=906.515  std=462.225
+[2026-05-20 20:42:19] INFO |   pigmentation_value     mean=0.000  std=1.000
+[2026-05-20 20:42:19] INFO |   wrinkle_value          mean=0.000  std=1.000
+[2026-05-20 20:42:20] INFO | model params: 24.6M
+[2026-05-20 20:42:20] INFO | 재개 모드: checkpoints\epoch010.pt 에서 이어 학습
+[2026-05-20 20:42:20] INFO | resume 완료. epoch 11 부터 진행
+[2026-05-20 20:44:22] INFO | device=cuda, validation_mode=False
+[2026-05-20 20:44:23] INFO | manifest 로드: 100386행
+[2026-05-20 20:44:23] INFO | split: train=75465 / val=14976 / test=9945
+[2026-05-20 20:44:23] INFO | 회귀 정규화 통계 (학습셋 기준):
+[2026-05-20 20:44:23] INFO |   moisture               mean=61.508  std=10.088
+[2026-05-20 20:44:23] INFO |   elasticity_mean        mean=0.304  std=0.027
+[2026-05-20 20:44:23] INFO |   pore_value             mean=906.515  std=462.225
+[2026-05-20 20:44:23] INFO |   pigmentation_value     mean=0.000  std=1.000
+[2026-05-20 20:44:23] INFO |   wrinkle_value          mean=0.000  std=1.000
+[2026-05-20 20:44:23] INFO | model params: 24.6M
+[2026-05-20 20:47:43] INFO | device=cuda, validation_mode=False
+[2026-05-20 20:47:43] INFO | manifest 로드: 100386행
+[2026-05-20 20:47:44] INFO | split: train=75465 / val=14976 / test=9945
+[2026-05-20 20:47:44] INFO | 회귀 정규화 통계 (학습셋 기준):
+[2026-05-20 20:47:44] INFO |   moisture               mean=61.508  std=10.088
+[2026-05-20 20:47:44] INFO |   elasticity_mean        mean=0.304  std=0.027
+[2026-05-20 20:47:44] INFO |   pore_value             mean=906.515  std=462.225
+[2026-05-20 20:47:44] INFO |   pigmentation_value     mean=0.000  std=1.000
+[2026-05-20 20:47:44] INFO |   wrinkle_value          mean=0.000  std=1.000
+[2026-05-20 20:47:44] INFO | model params: 24.6M
+[2026-05-20 20:56:56] INFO | device=cuda, validation_mode=False
+[2026-05-20 20:56:56] INFO | manifest 로드: 100386행
+[2026-05-20 20:56:56] INFO | split: train=75465 / val=14976 / test=9945
+[2026-05-20 20:56:56] INFO | 회귀 정규화 통계 (학습셋 기준):
+[2026-05-20 20:56:56] INFO |   moisture               mean=61.508  std=10.088
+[2026-05-20 20:56:56] INFO |   elasticity_mean        mean=0.304  std=0.027
+[2026-05-20 20:56:56] INFO |   pore_value             mean=906.515  std=462.225
+[2026-05-20 20:56:56] INFO |   pigmentation_value     mean=0.000  std=1.000
+[2026-05-20 20:56:56] INFO |   wrinkle_value          mean=0.000  std=1.000
+[2026-05-20 20:56:57] INFO | model params: 24.6M
+[2026-05-20 20:56:57] INFO | 재개 모드: checkpoints\epoch010.pt 에서 이어 학습
+[2026-05-20 20:56:57] INFO | resume 완료. epoch 11 부터 진행
+[2026-05-20 21:01:48] INFO | device=cuda, validation_mode=False
+[2026-05-20 21:01:48] INFO | manifest 로드: 100386행
+[2026-05-20 21:01:48] INFO | split: train=75465 / val=14976 / test=9945
+[2026-05-20 21:01:48] INFO | 회귀 정규화 통계 (학습셋 기준):
+[2026-05-20 21:01:48] INFO |   moisture               mean=61.508  std=10.088
+[2026-05-20 21:01:48] INFO |   elasticity_mean        mean=0.304  std=0.027
+[2026-05-20 21:01:48] INFO |   pore_value             mean=906.515  std=462.225
+[2026-05-20 21:01:48] INFO |   pigmentation_value     mean=0.000  std=1.000
+[2026-05-20 21:01:48] INFO |   wrinkle_value          mean=0.000  std=1.000
+[2026-05-20 21:01:49] INFO | model params: 24.6M
+[2026-05-20 21:11:57] INFO | device=cuda, validation_mode=False
+[2026-05-20 21:11:58] INFO | manifest 로드: 100386행
+[2026-05-20 21:11:58] INFO | split: train=75465 / val=14976 / test=9945
+[2026-05-20 21:11:58] INFO | 회귀 정규화 통계 (학습셋 기준):
+[2026-05-20 21:11:58] INFO |   moisture               mean=61.508  std=10.088
+[2026-05-20 21:11:58] INFO |   elasticity_mean        mean=0.304  std=0.027
+[2026-05-20 21:11:58] INFO |   pore_value             mean=906.515  std=462.225
+[2026-05-20 21:11:58] INFO |   pigmentation_value     mean=0.000  std=1.000
+[2026-05-20 21:11:58] INFO |   wrinkle_value          mean=0.000  std=1.000
+[2026-05-20 21:11:58] INFO | model params: 24.6M
+[2026-05-20 21:40:12] INFO | [epoch 1] val total=0.9768
+[2026-05-20 21:40:12] INFO | 체크포인트 저장: checkpoints\epoch001.pt
+[2026-05-20 22:07:41] INFO | [epoch 2] val total=1.0079
+[2026-05-20 22:07:42] INFO | 체크포인트 저장: checkpoints\epoch002.pt
+[2026-05-20 22:34:27] INFO | [epoch 3] val total=0.9519
+[2026-05-20 22:34:28] INFO | 체크포인트 저장: checkpoints\epoch003.pt
+[2026-05-20 23:02:19] INFO | [epoch 4] val total=0.9462
+[2026-05-20 23:02:19] INFO | 체크포인트 저장: checkpoints\epoch004.pt
+[2026-05-20 23:29:49] INFO | [epoch 5] val total=0.9513
+[2026-05-20 23:29:49] INFO | 체크포인트 저장: checkpoints\epoch005.pt
+[2026-05-20 23:57:25] INFO | [epoch 6] val total=0.9446
+[2026-05-20 23:57:25] INFO | 체크포인트 저장: checkpoints\epoch006.pt
+[2026-05-21 00:24:12] INFO | [epoch 7] val total=0.9263
+[2026-05-21 00:24:12] INFO | 체크포인트 저장: checkpoints\epoch007.pt
+[2026-05-21 00:51:39] INFO | [epoch 8] val total=0.9253
+[2026-05-21 00:51:39] INFO | 체크포인트 저장: checkpoints\epoch008.pt
+[2026-05-21 01:19:05] INFO | [epoch 9] val total=0.9142
+[2026-05-21 01:19:05] INFO | 체크포인트 저장: checkpoints\epoch009.pt
+[2026-05-21 01:46:09] INFO | [epoch 10] val total=0.9196
+[2026-05-21 01:46:10] INFO | 체크포인트 저장: checkpoints\epoch010.pt
+[2026-05-21 02:12:59] INFO | [epoch 11] val total=0.9236
+[2026-05-21 02:13:00] INFO | 체크포인트 저장: checkpoints\epoch011.pt
+[2026-05-21 02:39:42] INFO | [epoch 12] val total=0.9484
+[2026-05-21 02:39:43] INFO | 체크포인트 저장: checkpoints\epoch012.pt
+[2026-05-21 03:07:26] INFO | [epoch 13] val total=0.9474
+[2026-05-21 03:07:27] INFO | 체크포인트 저장: checkpoints\epoch013.pt
+[2026-05-21 03:35:24] INFO | [epoch 14] val total=0.8995
+[2026-05-21 03:35:24] INFO | 체크포인트 저장: checkpoints\epoch014.pt
+[2026-05-21 04:02:48] INFO | [epoch 15] val total=0.9099
+[2026-05-21 04:02:48] INFO | 체크포인트 저장: checkpoints\epoch015.pt
+[2026-05-21 04:30:13] INFO | [epoch 16] val total=0.9303
+[2026-05-21 04:30:14] INFO | 체크포인트 저장: checkpoints\epoch016.pt
+[2026-05-21 04:57:22] INFO | [epoch 17] val total=0.9017
+[2026-05-21 04:57:23] INFO | 체크포인트 저장: checkpoints\epoch017.pt
+[2026-05-21 05:24:55] INFO | [epoch 18] val total=0.8927
+[2026-05-21 05:24:56] INFO | 체크포인트 저장: checkpoints\epoch018.pt
+[2026-05-21 05:52:29] INFO | [epoch 19] val total=0.8944
+[2026-05-21 05:52:29] INFO | 체크포인트 저장: checkpoints\epoch019.pt
+[2026-05-21 06:19:35] INFO | [epoch 20] val total=0.8895
+[2026-05-21 06:19:35] INFO | 체크포인트 저장: checkpoints\epoch020.pt
+[2026-05-21 06:46:33] INFO | [epoch 21] val total=0.9041
+[2026-05-21 06:46:33] INFO | 체크포인트 저장: checkpoints\epoch021.pt
+[2026-05-21 07:13:48] INFO | [epoch 22] val total=0.8799
+[2026-05-21 07:13:49] INFO | 체크포인트 저장: checkpoints\epoch022.pt
+[2026-05-21 07:41:38] INFO | [epoch 23] val total=0.8874
+[2026-05-21 07:41:39] INFO | 체크포인트 저장: checkpoints\epoch023.pt
+[2026-05-21 08:09:05] INFO | [epoch 24] val total=0.8795
+[2026-05-21 08:09:05] INFO | 체크포인트 저장: checkpoints\epoch024.pt
+[2026-05-21 08:36:01] INFO | [epoch 25] val total=0.8861
+[2026-05-21 08:36:02] INFO | 체크포인트 저장: checkpoints\epoch025.pt
+[2026-05-21 09:03:20] INFO | [epoch 26] val total=0.8862
+[2026-05-21 09:03:20] INFO | 체크포인트 저장: checkpoints\epoch026.pt
+[2026-05-21 09:31:08] INFO | [epoch 27] val total=0.8870
+[2026-05-21 09:31:09] INFO | 체크포인트 저장: checkpoints\epoch027.pt
+[2026-05-21 09:58:39] INFO | [epoch 28] val total=0.8765
+[2026-05-21 09:58:39] INFO | 체크포인트 저장: checkpoints\epoch028.pt
+[2026-05-21 10:25:52] INFO | [epoch 29] val total=0.8859
+[2026-05-21 10:25:52] INFO | 체크포인트 저장: checkpoints\epoch029.pt
+[2026-05-21 10:53:22] INFO | [epoch 30] val total=0.8846
+[2026-05-21 10:53:23] INFO | 체크포인트 저장: checkpoints\epoch030.pt
+[2026-05-21 10:53:23] INFO | 학습 완료. best val loss = 0.8765

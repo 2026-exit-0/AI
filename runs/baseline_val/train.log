@@ -1,0 +1,34 @@
+[2026-05-20 19:54:06] INFO | device=cuda, validation_mode=True
+[2026-05-20 19:54:07] INFO | manifest 로드: 100386행
+[2026-05-20 19:54:07] INFO | validation-mode 활성화 → 샘플 2000개로 축소
+[2026-05-20 19:54:07] INFO | split: train=1479 / val=297 / test=224
+[2026-05-20 20:01:01] INFO | device=cuda, validation_mode=True
+[2026-05-20 20:01:01] INFO | manifest 로드: 100386행
+[2026-05-20 20:01:02] INFO | validation-mode 활성화 → 샘플 2000개로 축소
+[2026-05-20 20:01:02] INFO | split: train=1479 / val=297 / test=224
+[2026-05-20 20:01:02] INFO | 회귀 정규화 통계 (학습셋 기준):
+[2026-05-20 20:01:02] INFO |   moisture               mean=61.158  std=10.275
+[2026-05-20 20:01:02] INFO |   elasticity_mean        mean=0.306  std=0.027
+[2026-05-20 20:01:02] INFO |   pore_value             mean=990.546  std=486.206
+[2026-05-20 20:01:02] INFO |   pigmentation_value     mean=0.000  std=1.000
+[2026-05-20 20:01:02] INFO |   wrinkle_value          mean=0.000  std=1.000
+[2026-05-20 20:01:15] INFO | model params: 24.6M
+[2026-05-20 20:03:30] INFO | [epoch 1] val total=1.6306
+[2026-05-20 20:03:31] INFO | 체크포인트 저장: checkpoints\epoch001.pt
+[2026-05-20 20:04:32] INFO | [epoch 2] val total=1.2959
+[2026-05-20 20:04:33] INFO | 체크포인트 저장: checkpoints\epoch002.pt
+[2026-05-20 20:05:34] INFO | [epoch 3] val total=1.1914
+[2026-05-20 20:05:34] INFO | 체크포인트 저장: checkpoints\epoch003.pt
+[2026-05-20 20:06:35] INFO | [epoch 4] val total=1.2007
+[2026-05-20 20:07:36] INFO | [epoch 5] val total=1.1831
+[2026-05-20 20:07:36] INFO | 체크포인트 저장: checkpoints\epoch005.pt
+[2026-05-20 20:08:37] INFO | [epoch 6] val total=1.1595
+[2026-05-20 20:08:37] INFO | 체크포인트 저장: checkpoints\epoch006.pt
+[2026-05-20 20:09:39] INFO | [epoch 7] val total=1.1414
+[2026-05-20 20:09:39] INFO | 체크포인트 저장: checkpoints\epoch007.pt
+[2026-05-20 20:10:41] INFO | [epoch 8] val total=1.1652
+[2026-05-20 20:11:44] INFO | [epoch 9] val total=1.1226
+[2026-05-20 20:11:44] INFO | 체크포인트 저장: checkpoints\epoch009.pt
+[2026-05-20 20:12:45] INFO | [epoch 10] val total=1.1190
+[2026-05-20 20:12:45] INFO | 체크포인트 저장: checkpoints\epoch010.pt
+[2026-05-20 20:12:45] INFO | 학습 완료. best val loss = 1.1190
