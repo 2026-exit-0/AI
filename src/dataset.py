@@ -50,13 +50,17 @@ def build_transforms(image_size: int = 224, train: bool = True) -> transforms.Co
 def compute_class_weights(
     df: pd.DataFrame,
     classification_heads: Dict[str, int],
-    smooth: float = 0.1,
-    cap_ratio: float = 10.0,
+    smooth: float = 0.5,
+    max_weight: float = 5.0,
+    min_count: int = 5,
 ) -> Dict[str, torch.Tensor]:
     """학습셋 분포 기반 분류 헤드별 클래스 가중치 (sklearn 'balanced' 방식).
 
     공식: w_c = N / (K * (count_c + smooth))
-    매우 적은 클래스가 극단적 가중치를 받지 않도록 cap_ratio*mean 으로 제한.
+    안정성 보강:
+      - min_count: 학습셋 등장 횟수가 min_count 미만인 클래스는 1.0 으로 고정
+        (희소 클래스가 폭주 가중치를 받아 학습 망가지는 것 방지)
+      - max_weight: 그 외 모든 가중치는 절대 상한 max_weight 로 클리핑
 
     반환: {head_name: tensor(K,)} — losses.py 의 multitask_loss(class_weights=...) 에 그대로 주입.
     """
@@ -73,7 +77,8 @@ def compute_class_weights(
         if total == 0:
             continue
         w = total / (num_cls * (counts + smooth))
-        w = np.minimum(w, cap_ratio * w.mean())
+        w = np.minimum(w, max_weight)        # 절대 상한
+        w[counts < min_count] = 1.0          # 너무 희소한 클래스는 가중치 무효화
         weights[col] = torch.tensor(w, dtype=torch.float32)
     return weights
 
