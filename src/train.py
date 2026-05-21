@@ -25,6 +25,7 @@ from tqdm import tqdm
 from .dataset import (
     DamdaSkinDataset,
     collate_fn,
+    compute_class_weights,
     compute_regression_stats,
     split_manifest,
 )
@@ -64,7 +65,8 @@ def make_scheduler(optimizer, cfg: dict, num_epochs: int):
 
 # ---------------- Loops ----------------
 
-def train_one_epoch(model, loader, optimizer, scaler, device, cfg, writer, global_step, epoch):
+def train_one_epoch(model, loader, optimizer, scaler, device, cfg, writer, global_step, epoch,
+                    class_weights=None, regression_targets=None):
     model.train()
     use_amp = scaler is not None
     pbar = tqdm(loader, desc=f"[train ep{epoch}]", ncols=100)
@@ -79,6 +81,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device, cfg, writer, globa
                     out, batch,
                     regression_weight=cfg["training"]["regression_weight"],
                     classification_weight=cfg["training"]["classification_weight"],
+                    class_weights=class_weights,
+                    regression_targets=regression_targets,
                 )
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -89,6 +93,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device, cfg, writer, globa
                 out, batch,
                 regression_weight=cfg["training"]["regression_weight"],
                 classification_weight=cfg["training"]["classification_weight"],
+                class_weights=class_weights,
+                regression_targets=regression_targets,
             )
             loss.backward()
             optimizer.step()
@@ -102,7 +108,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device, cfg, writer, globa
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, cfg, writer, epoch, tag: str = "val"):
+def evaluate(model, loader, device, cfg, writer, epoch, tag: str = "val",
+             class_weights=None, regression_targets=None):
     model.eval()
     total_losses: Dict[str, float] = {}
     n = 0
@@ -113,6 +120,8 @@ def evaluate(model, loader, device, cfg, writer, epoch, tag: str = "val"):
             out, batch,
             regression_weight=cfg["training"]["regression_weight"],
             classification_weight=cfg["training"]["classification_weight"],
+            class_weights=class_weights,
+            regression_targets=regression_targets,
         )
         for k, v in info.items():
             total_losses[k] = total_losses.get(k, 0.0) + v
@@ -203,6 +212,15 @@ def main():
     for col, s in regression_stats.items():
         logger.info(f"  {col:22s} mean={s['mean']:.3f}  std={s['std']:.3f}")
 
+    # 분류 헤드별 class_weights (use_class_weights=true 일 때만)
+    class_weights = None
+    if cfg["training"].get("use_class_weights", False):
+        class_weights = compute_class_weights(train_df, classification_heads)
+        logger.info("class_weights (balanced, capped):")
+        for col, w in class_weights.items():
+            w_str = ", ".join(f"{x:.2f}" for x in w.tolist())
+            logger.info(f"  {col:22s} [{w_str}]")
+
     train_ds = DamdaSkinDataset(train_df, regression_targets, classification_heads,
                                 image_size=cfg["data"]["image_size"], train=True,
                                 regression_stats=regression_stats)
@@ -264,19 +282,33 @@ def main():
 
     # ----- Train -----
     best_val = math.inf
+    best_epoch = 0
+    patience_counter = 0
+    early_stop_patience = cfg["training"].get("early_stop_patience", 0)  # 0 = 비활성
     global_step = 0
     for epoch in range(start_epoch, num_epochs + 1):
         global_step = train_one_epoch(
             model, train_loader, optimizer, scaler, device, cfg, writer, global_step, epoch,
+            class_weights=class_weights, regression_targets=regression_targets,
         )
-        val_metrics = evaluate(model, val_loader, device, cfg, writer, epoch, tag="val")
-        logger.info(f"[epoch {epoch}] val total={val_metrics.get('loss/total', 0):.4f}")
+        val_metrics = evaluate(model, val_loader, device, cfg, writer, epoch, tag="val",
+                               class_weights=class_weights, regression_targets=regression_targets)
+        cur_val = val_metrics.get("loss/total", math.inf)
+        logger.info(f"[epoch {epoch}] val total={cur_val:.4f}")
 
         if scheduler is not None:
             scheduler.step()
 
+        improved = cur_val < best_val
+        if improved:
+            best_val = cur_val
+            best_epoch = epoch
+            patience_counter = 0
+        else:
+            patience_counter += 1
+
         save_every = cfg["logging"].get("save_every", 5)
-        if epoch % save_every == 0 or val_metrics.get("loss/total", math.inf) < best_val:
+        if epoch % save_every == 0 or improved:
             ckpt_path = out_dir / f"epoch{epoch:03d}.pt"
             torch.save({
                 "epoch": epoch,
@@ -287,9 +319,15 @@ def main():
                 "regression_stats": regression_stats,
             }, ckpt_path)
             logger.info(f"체크포인트 저장: {ckpt_path}")
-            best_val = min(best_val, val_metrics.get("loss/total", math.inf))
 
-    logger.info(f"학습 완료. best val loss = {best_val:.4f}")
+        if early_stop_patience and patience_counter >= early_stop_patience:
+            logger.info(
+                f"Early stopping: {patience_counter} epochs 동안 val 개선 없음 "
+                f"(best={best_val:.4f} @ epoch{best_epoch})"
+            )
+            break
+
+    logger.info(f"학습 완료. best val loss = {best_val:.4f} @ epoch{best_epoch}")
     writer.close()
 
 

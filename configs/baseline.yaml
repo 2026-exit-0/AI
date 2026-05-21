@@ -38,16 +38,22 @@ model:
 
 # ===== Training =====
 training:
-  epochs: 30
+  epochs: 50              # 30→50: overfit 신호 없어 더 길게 (early_stop이 안전망)
   batch_size: 16          # RTX 5060 8GB VRAM 기준 안전치 (OOM 시 12 또는 8로)
   optimizer: adam
-  lr: 0.001
+  lr: 0.0006              # 0.001→0.0006: 초기 진동 완화, cosine 길게 활용
   weight_decay: 0.0001
   scheduler: cosine       # cosine | step | none
   warmup_epochs: 1
 
   regression_weight: 1.0
   classification_weight: 0.5
+
+  # 약한 분류 헤드(wrinkle/skin_type/sensitive) 학습 보강
+  use_class_weights: true
+
+  # Early stopping — val/loss/total 이 N epoch 동안 개선 없으면 종료. 0=비활성
+  early_stop_patience: 8
 
   amp: true               # CUDA에서 자동 활성화. MPS/CPU는 무시.
 
