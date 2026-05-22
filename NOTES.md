@@ -80,6 +80,18 @@ python -m src.train --config configs/baseline.yaml --resume-from checkpoints\epo
 - 다시 접속 후 `train_resume.bat` 한 줄
 - SSH 끊김 ≠ 학습 종료 (Windows OpenSSH는 자식 종료 안 시키는 경우 多). `nvidia-smi` 와 train.log tail 로 살아있는지 먼저 확인
 
+**졸프실 PC 절전 비활성화** (한 번만, 관리자 cmd 필요)
+```cmd
+powercfg /change standby-timeout-ac 0
+powercfg /change hibernate-timeout-ac 0
+powercfg /change disk-timeout-ac 0
+REM 디스플레이도 안 끄려면: powercfg /change monitor-timeout-ac 0
+
+REM 설정 확인
+powercfg /query SCHEME_CURRENT SUB_SLEEP
+```
+PC 가 절전 들어가면 GPU 멈춰서 학습 중단됨. 노트북 sleep 은 학습에 무관.
+
 ### 학습 중 진행 확인
 ```cmd
 REM val 손실 추세
@@ -160,6 +172,20 @@ chcp 65001
 ```
 ```ps1
 Get-Content runs\main\train.log -Encoding UTF8
+```
+
+### `findstr` 가 한글 검색 못 함
+findstr 는 cp949 모드라 UTF-8 한글 매칭 실패. 영문 토큰으로 검색하거나 PowerShell 사용:
+```cmd
+REM ✗ 안 됨
+findstr "회귀 정규화" runs\main\train.log
+
+REM ✓ 됨 (영문)
+findstr "mean=" runs\main\train.log
+findstr "moisture" runs\main\train.log
+
+REM ✓ 됨 (PowerShell)
+powershell -Command "Get-Content runs\main\train.log -Encoding UTF8 | Select-String '회귀'"
 ```
 
 ### PowerShell 가상환경 활성화 스크립트 차단
