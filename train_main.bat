@@ -1,38 +1,60 @@
 @echo off
 setlocal EnableDelayedExpansion
-REM Start new main training (after checkpoint cleanup). All-ASCII, goto-based for cmd parser safety.
+REM Start new main training. Tries venv activation but falls back to current shell's python.
 
 cd /d C:\damda\AI
 
-REM Auto-detect venv: .venv (lab PC) or myvenv (laptop) or venv
+REM Try to activate a venv if available
+REM   Lab PC: C:\damda\.venv  (parent of AI)
+REM   Laptop: C:\Users\YSB\...\2026-damda\AI\myvenv
+set VENV_OK=0
 if exist .venv\Scripts\activate.bat (
     call .venv\Scripts\activate.bat
+    set VENV_OK=1
+) else if exist ..\.venv\Scripts\activate.bat (
+    call ..\.venv\Scripts\activate.bat
+    set VENV_OK=1
 ) else if exist myvenv\Scripts\activate.bat (
     call myvenv\Scripts\activate.bat
+    set VENV_OK=1
+) else if exist ..\myvenv\Scripts\activate.bat (
+    call ..\myvenv\Scripts\activate.bat
+    set VENV_OK=1
 ) else if exist venv\Scripts\activate.bat (
     call venv\Scripts\activate.bat
-) else (
-    echo [ERROR] No venv found ^(.venv / myvenv / venv^).
+    set VENV_OK=1
+)
+
+if "!VENV_OK!"=="0" (
+    echo [INFO] No venv activate.bat found in .venv / myvenv / venv.
+    echo        Using current shell's python instead.
+)
+
+REM Verify python is callable
+where python >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] python not found on PATH. Activate your venv manually first.
     exit /b 1
 )
+
+echo Using python:
+where python
+python --version
+echo.
 
 REM Safety guard: warn if existing checkpoints would be overwritten
 if exist checkpoints\epoch001.pt goto :guard
 goto :run
 
 :guard
-echo.
 echo [WARN] Existing checkpoints found in checkpoints\
 echo        Starting new run may overwrite them.
-echo        To preserve, first run:
-echo            ren runs\main main_vX
-echo            rmdir /s /q checkpoints
+echo        To preserve: ren runs\main main_vX  AND  rmdir /s /q checkpoints
 echo.
 set /p ans=Continue anyway [y/N]:
 if /i not "!ans!"=="y" exit /b 1
 
 :run
-REM Background detached run -- survives SSH disconnect best-effort
 start "damda-train" /B python -m src.train --config configs/baseline.yaml > train_console.log 2>&1
 
 echo.
