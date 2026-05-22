@@ -184,8 +184,21 @@ def process_one_image(
         moisture           = _try_keys(equipment, k("moisture"))
         elasticity_mean    = _gather_elasticity_mean(equipment, prefix)
         pore_value         = _try_keys(equipment, k("pore"))
-        pigmentation_value = _try_keys(equipment, k("pigmentation"))
-        wrinkle_value      = _try_keys(equipment, k("wrinkle"))
+
+        # v3: AI-Hub 데이터는 부위별로 다른 측정 항목을 가짐.
+        # pigmentation 측정값은 PART_0(전체 얼굴)의 'pigmentation_count' 만 존재.
+        # 다른 부위(이마/볼)의 pigmentation 은 annotations 의 전문가 등급만 있음.
+        if region == "PART_0":
+            pigmentation_value = _try_keys(equipment, "pigmentation_count")
+        else:
+            pigmentation_value = None
+
+        # wrinkle 측정값은 L_EYE/R_EYE 의 8개 거칠기 파라미터(Ra/Rmax/Rt/...) 형태로 존재.
+        # 단일 대표값으로 Ra(평균 거칠기) 사용. 다른 부위(이마/미간 등)는 annotations 등급만.
+        if region in ("L_EYE", "R_EYE"):
+            wrinkle_value = _try_keys(equipment, k("wrinkle_Ra"))
+        else:
+            wrinkle_value = None
 
         wrinkle_grade      = _try_keys(annotations, k("wrinkle"))
         pigmentation_grade = _try_keys(annotations, k("pigmentation"))

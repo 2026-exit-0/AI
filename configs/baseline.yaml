@@ -19,13 +19,16 @@ model:
   num_regions: 9          # PART_0, FOREHEAD, GLABELLA, L_EYE, R_EYE, L_CHEEK, R_CHEEK, LIP, CHIN
   dropout: 0.2
 
-  # v3: pigmentation_value / wrinkle_value 는 manifest에 0건 (100% 결측) → 헤드 제거.
-  # 학습 신호 0이라 backbone 용량만 낭비하고 무관 gradient 만 흐름.
-  # (분류 헤드의 pigmentation_grade / wrinkle_grade 는 그대로 유지 — 별도 신호)
+  # v3: build_manifest.py 수정으로 다음 두 값을 부위 특화로 채움:
+  #   - pigmentation_value: PART_0 의 pigmentation_count (전체 얼굴 색소반점 개수)
+  #   - wrinkle_value:      L_EYE/R_EYE 의 *_wrinkle_Ra (평균 거칠기)
+  # 다른 부위는 NaN → dataset.py 에서 mask=0 으로 자동 제외 (정상 동작)
   regression_targets:
     - moisture
     - elasticity_mean
     - pore_value
+    - pigmentation_value
+    - wrinkle_value
 
   # 클래스 수는 manifest의 라벨 unique 값 기준 (max + 1)
   classification_heads:
