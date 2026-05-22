@@ -19,12 +19,13 @@ model:
   num_regions: 9          # PART_0, FOREHEAD, GLABELLA, L_EYE, R_EYE, L_CHEEK, R_CHEEK, LIP, CHIN
   dropout: 0.2
 
+  # v3: pigmentation_value / wrinkle_value 는 manifest에 0건 (100% 결측) → 헤드 제거.
+  # 학습 신호 0이라 backbone 용량만 낭비하고 무관 gradient 만 흐름.
+  # (분류 헤드의 pigmentation_grade / wrinkle_grade 는 그대로 유지 — 별도 신호)
   regression_targets:
     - moisture
     - elasticity_mean
     - pore_value
-    - pigmentation_value
-    - wrinkle_value
 
   # 클래스 수는 manifest의 라벨 unique 값 기준 (max + 1)
   classification_heads:
@@ -41,7 +42,7 @@ training:
   epochs: 50              # 30→50: overfit 신호 없어 더 길게 (early_stop이 안전망)
   batch_size: 16          # RTX 5060 8GB VRAM 기준 안전치 (OOM 시 12 또는 8로)
   optimizer: adam
-  lr: 0.0006              # 0.001→0.0006: 초기 진동 완화, cosine 길게 활용
+  lr: 0.0008              # v3: 0.0006→0.0008. cosine 활용은 유지하되 약간 회복
   weight_decay: 0.0001
   scheduler: cosine       # cosine | step | none
   warmup_epochs: 1
@@ -49,8 +50,10 @@ training:
   regression_weight: 1.0
   classification_weight: 0.5
 
-  # 약한 분류 헤드(wrinkle/skin_type/sensitive) 학습 보강
-  use_class_weights: true
+  # v3: false. v2에서 분류 전반 악화 (pore +0.08, pigmentation +0.07, dryness +0.03)이고
+  # 약한 헤드(wrinkle/skin_type/sensitive)도 개선 안 됨 → balanced 가중치 역효과.
+  # 약한 헤드는 v4에서 focal loss 등으로 별도 처치 예정.
+  use_class_weights: false
 
   # Early stopping — val/loss/total 이 N epoch 동안 개선 없으면 종료. 0=비활성
   early_stop_patience: 8
