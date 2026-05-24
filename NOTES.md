@@ -45,16 +45,42 @@ equipment(측정값) ≠ annotations(전문가 등급). 부위마다 둘 다 있
 
 ### 학습 (졸프실 PC cmd, SSH 권장)
 
-**가장 단순 — `.bat` 래퍼 사용** (백그라운드 분리 실행 + resume 자동):
+**가장 단순 — `.bat` 래퍼 사용**:
+
+| 래퍼 | 용도 | 노트북 꺼도 OK? |
+|---|---|---|
+| `train_detach.bat` | 새 학습 시작 (**SSH/노트북과 완전 분리, 권장**) | ✅ 가능 |
+| `train_main.bat` | 새 학습 시작 (같은 cmd에서 `start /B`) | ⚠ SSH 종료 시 학습 죽을 수 있음 |
+| `train_resume.bat` | 끊긴 학습 이어가기 (`--resume`) | ⚠ 동일 |
+
 ```cmd
 cd C:\damda\AI
 
-REM 새 학습 시작 (체크포인트 가드 포함)
+REM ★ 권장: 노트북 꺼도 학습 유지 (schtasks 사용)
+train_detach.bat
+
+REM 같은 세션 안에서만 백그라운드 (간단 테스트용)
 train_main.bat
 
-REM 끊긴 학습 이어가기 (가장 자주 쓰게 될 명령)
+REM 끊긴 학습 이어가기
 train_resume.bat
 ```
+
+**`train_detach.bat` 작동 원리**
+- Windows 작업 스케줄러(`schtasks`)에 "damda-train" task 등록 후 즉시 실행
+- 학습은 SSH cmd 의 자식이 아니라 schtasks 컨텍스트의 자식이 됨 → 부모 SSH 가 죽어도 영향 없음
+- 실제 학습 진입점은 `_train_payload.bat` (venv 자동 활성화 + python 직접 호출, `start /B` 없음)
+- task 관리:
+  ```cmd
+  REM 상태 확인 (Status: Running 이면 정상)
+  schtasks /query /tn "damda-train" /v /fo LIST
+
+  REM 학습 강제 중단
+  schtasks /end /tn "damda-train"
+
+  REM task 삭제 (학습 완전 끝난 뒤)
+  schtasks /delete /tn "damda-train" /f
+  ```
 
 **직접 명령으로 하고 싶을 때**:
 ```cmd
