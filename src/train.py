@@ -83,6 +83,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device, cfg, writer, globa
                     classification_weight=cfg["training"]["classification_weight"],
                     class_weights=class_weights,
                     regression_targets=regression_targets,
+                    classification_loss_type=cfg["training"].get("classification_loss", "ce"),
+                    focal_gamma=float(cfg["training"].get("focal_gamma", 2.0)),
                 )
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -95,6 +97,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device, cfg, writer, globa
                 classification_weight=cfg["training"]["classification_weight"],
                 class_weights=class_weights,
                 regression_targets=regression_targets,
+                classification_loss_type=cfg["training"].get("classification_loss", "ce"),
+                focal_gamma=float(cfg["training"].get("focal_gamma", 2.0)),
             )
             loss.backward()
             optimizer.step()
@@ -122,6 +126,8 @@ def evaluate(model, loader, device, cfg, writer, epoch, tag: str = "val",
             classification_weight=cfg["training"]["classification_weight"],
             class_weights=class_weights,
             regression_targets=regression_targets,
+            classification_loss_type=cfg["training"].get("classification_loss", "ce"),
+            focal_gamma=float(cfg["training"].get("focal_gamma", 2.0)),
         )
         for k, v in info.items():
             total_losses[k] = total_losses.get(k, 0.0) + v
@@ -220,6 +226,14 @@ def main():
         for col, w in class_weights.items():
             w_str = ", ".join(f"{x:.2f}" for x in w.tolist())
             logger.info(f"  {col:22s} [{w_str}]")
+
+    # 분류 손실 종류 (v4~)
+    _cls_loss = (cfg["training"].get("classification_loss", "ce") or "ce").lower()
+    _focal_g  = float(cfg["training"].get("focal_gamma", 2.0))
+    if _cls_loss == "focal":
+        logger.info(f"분류 손실: focal (gamma={_focal_g})")
+    else:
+        logger.info("분류 손실: ce")
 
     train_ds = DamdaSkinDataset(train_df, regression_targets, classification_heads,
                                 image_size=cfg["data"]["image_size"], train=True,
