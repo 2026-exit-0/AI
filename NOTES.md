@@ -119,6 +119,16 @@ powercfg /query SCHEME_CURRENT SUB_SLEEP
 PC 가 절전 들어가면 GPU 멈춰서 학습 중단됨. 노트북 sleep 은 학습에 무관.
 
 ### 학습 중 진행 확인
+
+**4종 세트** — 역할이 다 다름. 학습 살았는지 의심될 때 위에서부터 차례로:
+
+| 명령 | 보여주는 것 |
+|---|---|
+| `schtasks /query /tn "damda-train" /fo LIST \| findstr Status` | task 자체 (`Running` / `Ready`(=끝)) |
+| `powershell -Command "Get-Content runs\main\train.log -Tail 5 -Encoding UTF8"` | epoch 진행, val total 추세 |
+| `nvidia-smi` | GPU 가 일하고 있나 (VRAM 점유 + Util%) |
+| `dir checkpoints` | epoch 가 실제로 끝났나 (27분마다 ckpt 추가) |
+
 ```cmd
 REM val 손실 추세
 findstr /C:"val total" runs\main\train.log
@@ -126,12 +136,25 @@ findstr /C:"val total" runs\main\train.log
 REM 마지막 5줄 (UTF-8)
 powershell -Command "Get-Content runs\main\train.log -Tail 5 -Encoding UTF8"
 
-REM GPU (정상이면 70%+)
+REM GPU (정상이면 70%+. 시작 직후 1~2분은 0% 일 수 있음 — 데이터로딩 워밍업)
 nvidia-smi
 
 REM 파일 크기 변화로 학습 살아있는지 확인
 dir train_console.log
 ```
+
+**학습 완료 신호**
+- `schtasks /query` Status: `Ready` (실행 끝남)
+- `train.log` 마지막 줄: `학습 완료. best val loss = X.XXXX @ epochNN`
+- `checkpoints/` 에 epochNNN.pt 가 의도한 마지막 epoch 까지 다 있음
+
+**끄기 전 sanity check (학습 시작 직후 1~2분 후 권장)**
+```cmd
+schtasks /query /tn "damda-train" /fo LIST | findstr Status
+powershell -Command "Get-Content C:\damda\AI\runs\main\train.log -Tail 10 -Encoding UTF8"
+nvidia-smi
+```
+이 셋 다 정상이면 SSH/노트북 꺼도 안전.
 
 ### per-head 손실 분석 (v1/v2/v3 비교)
 ```cmd
