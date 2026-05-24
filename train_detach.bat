@@ -26,9 +26,10 @@ if not errorlevel 1 (
 )
 
 REM Register task ^(one-time, scheduled in far future, then manually triggered^)
-schtasks /create /tn "%TASKNAME%" /tr "C:\damda\AI\_train_payload.bat" /sc once /sd 01/01/2099 /st 00:00 /f >nul
+REM Date format follows system locale. Korean Windows uses yyyy/mm/dd.
+schtasks /create /tn "%TASKNAME%" /tr "C:\damda\AI\_train_payload.bat" /sc once /sd 2099/01/01 /st 00:00 /f >nul
 if errorlevel 1 (
-    echo [ERROR] schtasks /create failed. Check permissions.
+    echo [ERROR] schtasks /create failed. Check permissions or date locale.
     exit /b 1
 )
 
