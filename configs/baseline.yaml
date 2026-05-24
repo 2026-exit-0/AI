@@ -1,4 +1,4 @@
-# damda AI Baseline 학습 설정 (GPU 환경)
+# damda AI Baseline 학습 설정 (GPU 환경, v4)
 
 seed: 42
 
@@ -55,8 +55,14 @@ training:
 
   # v3: false. v2에서 분류 전반 악화 (pore +0.08, pigmentation +0.07, dryness +0.03)이고
   # 약한 헤드(wrinkle/skin_type/sensitive)도 개선 안 됨 → balanced 가중치 역효과.
-  # 약한 헤드는 v4에서 focal loss 등으로 별도 처치 예정.
+  # v4: false 유지. focal loss 로 약한 헤드 처치 (아래 classification_loss 참고).
   use_class_weights: false
+
+  # v4: 분류 손실 종류. 'ce' | 'focal'. focal 은 hard example 에 손실 집중 (γ=focal_gamma).
+  # γ=0 이면 CE 와 수학적 동일. 7개 분류 헤드에 일괄 적용.
+  # 의도: cls_skin_type (1.5057) / cls_wrinkle_grade (1.1962) 개선.
+  classification_loss: focal
+  focal_gamma: 2.0
 
   # Early stopping — val/loss/total 이 N epoch 동안 개선 없으면 종료. 0=비활성
   early_stop_patience: 8
