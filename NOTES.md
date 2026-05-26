@@ -482,3 +482,83 @@ AI/
   checkpoints/                   ← 학습 중 epoch별 ckpt (gitignored)
   myvenv/                        ← 가상환경 (gitignored)
 ```
+
+---
+
+## 8. 시연 환경 — ESP32-CAM 스캐너 (Phase 2, 2026-06 중순 시연)
+
+### 하드웨어 구성 (중간 발표 기록)
+
+| 분류 | 부품 | 비고 |
+|---|---|---|
+| 메인 컨트롤러 | ESP32-CAM (AI Thinker) | Wi-Fi + OV2640 카메라 내장 |
+| 카메라 모듈 | OV2640 | 실용 해상도 **640×480 ~ 800×600** (메모리/대역폭 한계) |
+| 수분 센서 | FDC2112 (Moisture Click) | I²C 0x2A, 정전용량 방식 — AI-Hub `moisture` 와 원리 동일 |
+| 조도 센서 | VEML7700 | I²C 0x10, 조도 + 자외선 간접 추정 |
+| 조명 | 백색 LED ×3 + UV LED (395nm) ×1 | UV 는 색소반점 검출 보조 (의학적 원리) |
+| 촬영 트리거 | 택트스위치 (IO2) | user trigger |
+| 전원 | TP4056 + 3.7V LiPo + 안정화 커패시터 | |
+| 통신 | I²C (IO14/IO15) + Wi-Fi 웹서버 | 고정 IP 10.105.206.100 |
+| 펌웨어 | CH340 MB 보드 (USB 시리얼) | |
+
+### AI-Hub ↔ ESP32-CAM 도메인 갭
+
+| 차원 | AI-Hub 학습 | ESP32-CAM 시연 | 갭 | 대응 |
+|---|---|---|---|---|
+| 해상도 | 디카 수천만 px → 224×224 crop | 640×480 → 부위 crop ~100-200px | 🔴 매우 큼 | scanner_aug (저해상도 시뮬) |
+| JPEG 압축 | 약함 (원본 RAW 가능) | 강함 (대역폭 절감) | 🔴 큼 | scanner_aug (JPEG quality 30~70) |
+| 색 정확도 | DSLR 표준 | OV2640 저정확도 | 🟡 중 | ColorJitter 강화 |
+| 노이즈 | 낮음 | 높음 (저조도시 더) | 🟡 중 | GaussianNoise aug |
+| 조명 균일성 | 스튜디오 균일 | LED ×3 균일 | 🟢 작음 (오히려 유리) | 별도 대응 불필요 |
+| 부위 식별 | JSON 메타 명시 | 스캐너는 모름 | 🔴 큼 | **UI 에서 user 가 부위 명시** (mediapipe over-engineering) |
+| 센서 입력 | 없음 (image only) | FDC2112 + VEML7700 | 신규 차원 | model.py sensor_branch 활용 |
+
+### 시연 시나리오 (3주 후)
+
+```
+사용자 UI 흐름:
+  1. 부위 선택 ("이마 측정 시작")
+  2. 스캐너 댐 → 택트스위치
+  3. 백색 LED 점등 → 사진 1장 + FDC2112 수분값 + VEML7700 조도값 캡처
+  4. (선택) UV LED 점등 → UV 사진 1장 추가 (색소반점 보조 시각화용, 모델 입력엔 X)
+  5. Wi-Fi 로 노트북/PC 에 전송
+  6. infer.py → 부위별 측정값 (수분/탄력/모공) + 등급 (주름/색소/모공 등) 반환
+  7. UI 에 결과 표시
+```
+
+핵심: **부위 자동 인식 없음** — user 가 측정 전에 명시. 시연 안정성 ↑ + 구현 비용 ↓.
+
+### Mitigation 전략 (시연 3주 작업 분할)
+
+**Week 1 (현재)**
+1. scanner-matched augmentation 파이프라인 — dataset.py `build_transforms(augment_mode='scanner')` 옵션
+2. 센서 입력 학습 파이프라인 — model.py sensor_branch 활성화 (sensor_dim=2)
+3. `src/infer.py` — 시연용 단일 추론 entry
+4. (50건 데이터 도착 대기) — ESP32-CAM 실측 페어 데이터
+
+**Week 2**
+5. v5 본 학습 — scanner_aug ON + sensor_input ON + 헤드별 focal γ
+6. 50건 ESP32-CAM 데이터로 **fine-tune** (마지막 5 epoch 만, lr ×0.1)
+   - lab PC 학습 데이터: 100K AI-Hub + 50 ESP32-CAM (oversample 10× = 500)
+   - 또는 stage-2: AI-Hub 학습 끝난 ckpt 를 50건 ESP32-CAM 으로 fine-tune
+
+**Week 3**
+7. Gradio UI + ESP32 Wi-Fi 연동 (HTTP polling 또는 WebSocket)
+8. End-to-end 리허설 — 부위별 측정 흐름 5번 반복 안정성 확인
+
+### 센서 활용 매핑
+
+| 센서 | AI-Hub 매칭 컬럼 | 모델 활용 |
+|---|---|---|
+| FDC2112 (수분) | `moisture` (corneometer) | **회귀 타겟 → 입력 feature** ablation. 단위 캘리브레이션 필요 (TBD: 같은 사람 corneometer vs FDC2112 측정 비교) |
+| VEML7700 (조도) | 없음 | 환경 메타 입력 — 모델이 광원 변화 보정에 활용 가능 |
+| UV LED 395nm 이미지 | 없음 (AI-Hub 가시광만) | 시연 시 화면에 별도 표시 (의학적 시각화), 모델 입력 X |
+
+### 50건 데이터 확보 계획
+
+- 수일 내 ESP32-CAM 으로 50건 이상 페어 데이터 (image + 센서값) 수집 가능 (사용자 보고)
+- 라벨: 전문가 등급은 불가능 (전문가 필요). 측정값 (FDC2112 수분) 만 ground truth
+- 활용:
+  - **검증 set**: 모델 이미지 예측 moisture vs FDC2112 실측 moisture 상관관계
+  - **fine-tune set**: 회귀 헤드 (moisture) 만 한정 supervision, 분류는 self-distill 또는 fix
+  - **augmentation 보정**: scanner_aug 가 실제 ESP32-CAM 분포를 얼마나 정확히 시뮬하는지 KL divergence 측정

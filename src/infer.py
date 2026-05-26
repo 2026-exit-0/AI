@@ -1,0 +1,336 @@
+"""단일 이미지 추론 — 시연용 entry point.
+
+evaluate.py 가 test set 전체를 batch 추론한다면, 본 스크립트는 ESP32-CAM 시연
+시나리오에 맞춰 **이미지 한 장 + 부위 명시 + (선택) 센서값** 을 받아 부위별
+측정값/등급 dict 를 반환한다.
+
+사용 예 (Python API — Gradio UI 등에서 호출):
+
+    from src.infer import DamdaInferenceModel
+
+    model = DamdaInferenceModel(
+        "checkpoints/epoch030.pt",
+        config_path="configs/baseline.yaml",
+    )
+    result = model.predict(
+        image_path="scan.jpg",      # 또는 PIL.Image
+        region="L_CHEEK",           # 또는 region_id=5
+        sensor={"moisture": 42.5},  # 선택. 학습된 sensor_inputs 와 매칭
+        bbox=None,                  # 선택. (x1,y1,x2,y2)
+        return_probs=True,          # 분류 확률 함께 반환
+    )
+    # result["regression"]["moisture"] -> 38.2 (denormalized)
+    # result["classification"]["wrinkle_grade"] -> 2 (predicted class)
+    # result["classification_probs"]["wrinkle_grade"] -> [0.05, 0.15, 0.62, ...]
+
+사용 예 (CLI — 디버깅용):
+    python -m src.infer --checkpoint checkpoints/epoch030.pt ^
+        --image scan.jpg --region L_CHEEK --sensor moisture=42.5
+
+설계 의도 / 시연 시나리오는 NOTES.md 8절 참고.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+import yaml
+from PIL import Image
+
+from .dataset import build_transforms, compute_regression_stats, compute_sensor_stats
+from .model import DamdaSkinModel
+from .utils import ID_TO_REGION, REGION_TO_ID, get_device
+
+
+# ============================================================
+# Inference 클래스
+# ============================================================
+
+class DamdaInferenceModel:
+    """단일 샘플 추론 엔진. Gradio/Flask UI 의 백엔드 또는 CLI 의 동작 주체.
+
+    초기화 시 한 번만 ckpt 를 로드하고, predict() 호출마다 빠르게 추론한다.
+    """
+
+    def __init__(
+        self,
+        checkpoint_path: Union[str, Path],
+        config_path: Optional[Union[str, Path]] = None,
+        device: Optional[torch.device] = None,
+    ):
+        self.checkpoint_path = Path(checkpoint_path)
+        self.device = device or get_device()
+
+        # ---- Checkpoint 로드 ----
+        ckpt = torch.load(self.checkpoint_path, map_location=self.device)
+        self.ckpt_epoch = int(ckpt.get("epoch", -1))
+
+        # config — 인자 우선, 없으면 ckpt 내부, 그래도 없으면 에러
+        if config_path is not None:
+            self.cfg = yaml.safe_load(open(config_path, "r", encoding="utf-8"))
+        elif "config" in ckpt:
+            self.cfg = ckpt["config"]
+        else:
+            raise ValueError("config_path 가 None 이고 ckpt 에도 config 없음")
+
+        model_cfg = self.cfg["model"]
+        self.regression_targets: List[str] = list(model_cfg["regression_targets"])
+        self.classification_heads: Dict[str, int] = dict(model_cfg["classification_heads"])
+        self.image_size: int = int(self.cfg["data"]["image_size"])
+
+        # ---- Sensor 설정 (ckpt 우선) ----
+        self.sensor_inputs: List[str] = list(
+            ckpt.get("sensor_inputs", self.cfg["data"].get("sensor_inputs", []) or [])
+        )
+        self.sensor_dim = len(self.sensor_inputs)
+
+        # ---- 통계 (정규화/역정규화용) ----
+        self.regression_stats: Dict[str, Dict[str, float]] = ckpt.get(
+            "regression_stats", {col: {"mean": 0.0, "std": 1.0} for col in self.regression_targets}
+        )
+        self.sensor_stats: Dict[str, Dict[str, float]] = ckpt.get(
+            "sensor_stats", {col: {"mean": 0.0, "std": 1.0} for col in self.sensor_inputs}
+        )
+
+        # ---- 모델 구성 + 가중치 로드 ----
+        self.model = DamdaSkinModel(
+            backbone=model_cfg["backbone"],
+            pretrained=False,
+            num_regions=model_cfg["num_regions"],
+            region_emb_dim=model_cfg["region_emb_dim"],
+            regression_targets=self.regression_targets,
+            classification_heads=self.classification_heads,
+            dropout=model_cfg.get("dropout", 0.2),
+            sensor_dim=self.sensor_dim,
+            sensor_emb_dim=model_cfg.get("sensor_emb_dim", 32),
+        ).to(self.device)
+        self.model.load_state_dict(ckpt["model"])
+        self.model.eval()
+
+        # ---- 추론용 transform (결정론적, augmentation 없음) ----
+        self.transform = build_transforms(self.image_size, train=False)
+
+    # --------------------------------------------------------
+    # Public API
+    # --------------------------------------------------------
+
+    @torch.no_grad()
+    def predict(
+        self,
+        image_path: Union[str, Path, Image.Image],
+        region: Union[str, int],
+        sensor: Optional[Dict[str, float]] = None,
+        bbox: Optional[Tuple[int, int, int, int]] = None,
+        return_probs: bool = False,
+    ) -> dict:
+        """단일 이미지 추론.
+
+        Args:
+            image_path: 이미지 파일 경로 또는 이미 열린 PIL.Image.
+            region: 부위 이름 ('L_CHEEK', 'FOREHEAD', ...) 또는 region_id (정수).
+            sensor: 센서 측정값 dict. 학습된 sensor_inputs 와 매칭되지 않으면 mask=0.
+                예: {"moisture": 42.5}. None 이면 전부 결측 처리 (모델은 영향 받지만 동작은 함).
+            bbox: (x1, y1, x2, y2). 없으면 이미지 전체 사용 (ESP32-CAM 이 이미 부위 crop 한 가정).
+            return_probs: True 면 classification 헤드별 softmax 확률 (List[float]) 도 반환.
+
+        Returns:
+            dict {
+                "regression": {head: denormalized_value},
+                "classification": {head: predicted_class_idx},
+                "classification_probs": {head: [p0, p1, ...]},   # return_probs=True 일 때만
+                "meta": {...},
+            }
+        """
+        # ---- Region 처리 ----
+        if isinstance(region, str):
+            if region not in REGION_TO_ID:
+                raise ValueError(f"알 수 없는 region: {region!r}. 후보: {list(REGION_TO_ID)}")
+            region_id = REGION_TO_ID[region]
+            region_name = region
+        else:
+            region_id = int(region)
+            region_name = ID_TO_REGION.get(region_id, f"REGION_{region_id}")
+
+        # ---- 이미지 로드 + (선택) bbox crop ----
+        if isinstance(image_path, Image.Image):
+            img = image_path.convert("RGB")
+        else:
+            img = Image.open(image_path).convert("RGB")
+
+        if bbox is not None:
+            x1, y1, x2, y2 = (int(v) for v in bbox)
+            if x2 > x1 and y2 > y1:
+                img = img.crop((x1, y1, x2, y2))
+
+        img_tensor = self.transform(img).unsqueeze(0).to(self.device)  # (1, C, H, W)
+        rid_tensor = torch.tensor([region_id], dtype=torch.long, device=self.device)
+
+        # ---- Sensor 텐서 준비 ----
+        sensor_tensor: Optional[torch.Tensor] = None
+        sensor_mask_tensor: Optional[torch.Tensor] = None
+        if self.sensor_dim > 0:
+            values, mask = [], []
+            sensor = sensor or {}
+            for col in self.sensor_inputs:
+                if col in sensor and sensor[col] is not None:
+                    st = self.sensor_stats.get(col, {"mean": 0.0, "std": 1.0})
+                    std = max(float(st["std"]), 1e-6)
+                    values.append((float(sensor[col]) - float(st["mean"])) / std)
+                    mask.append(1.0)
+                else:
+                    values.append(0.0)
+                    mask.append(0.0)
+            sensor_tensor = torch.tensor([values], dtype=torch.float32, device=self.device)
+            sensor_mask_tensor = torch.tensor([mask], dtype=torch.float32, device=self.device)
+
+        # ---- Forward ----
+        if self.sensor_dim > 0:
+            out = self.model(
+                img_tensor, rid_tensor,
+                sensor=sensor_tensor, sensor_mask=sensor_mask_tensor,
+            )
+        else:
+            out = self.model(img_tensor, rid_tensor)
+
+        # ---- 후처리: 회귀 denormalize ----
+        regression_out: Dict[str, float] = {}
+        if "regression" in out:
+            reg = out["regression"].squeeze(0).cpu().numpy()  # (R,)
+            for i, name in enumerate(self.regression_targets):
+                st = self.regression_stats.get(name, {"mean": 0.0, "std": 1.0})
+                std = max(float(st["std"]), 1e-6)
+                regression_out[name] = float(reg[i]) * std + float(st["mean"])
+
+        # ---- 후처리: 분류 argmax + (선택) softmax 확률 ----
+        classification_out: Dict[str, int] = {}
+        classification_probs: Dict[str, List[float]] = {}
+        if "classification" in out:
+            for name, logits in out["classification"].items():
+                logits_1d = logits.squeeze(0)  # (K,)
+                pred = int(torch.argmax(logits_1d).item())
+                classification_out[name] = pred
+                if return_probs:
+                    probs = F.softmax(logits_1d, dim=-1).cpu().numpy().tolist()
+                    classification_probs[name] = [float(p) for p in probs]
+
+        result = {
+            "regression": regression_out,
+            "classification": classification_out,
+            "meta": {
+                "region": region_name,
+                "region_id": region_id,
+                "ckpt_epoch": self.ckpt_epoch,
+                "checkpoint": str(self.checkpoint_path),
+                "sensor_dim": self.sensor_dim,
+                "sensor_inputs_used": self.sensor_inputs,
+            },
+        }
+        if return_probs:
+            result["classification_probs"] = classification_probs
+        return result
+
+    def regression_target_names(self) -> List[str]:
+        """반환 dict 의 regression 키 순서 — UI 에서 표 헤더 만들 때 사용."""
+        return list(self.regression_targets)
+
+    def classification_head_names(self) -> List[str]:
+        """반환 dict 의 classification 키 순서 — UI 에서 표 헤더 만들 때 사용."""
+        return list(self.classification_heads.keys())
+
+
+# ============================================================
+# CLI
+# ============================================================
+
+def _parse_sensor_args(items: List[str]) -> Dict[str, float]:
+    """`--sensor key=value` 여러 개를 dict 로. CLI 헬퍼."""
+    out: Dict[str, float] = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"--sensor 항목은 key=value 형식: {item!r}")
+        k, v = item.split("=", 1)
+        out[k.strip()] = float(v.strip())
+    return out
+
+
+def _parse_bbox(s: str) -> Tuple[int, int, int, int]:
+    parts = [int(x) for x in s.split(",")]
+    if len(parts) != 4:
+        raise ValueError(f"--bbox 는 'x1,y1,x2,y2' 형식: {s!r}")
+    return tuple(parts)  # type: ignore[return-value]
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="단일 이미지 추론 (ESP32-CAM 시연용)")
+    ap.add_argument("--checkpoint", required=True)
+    ap.add_argument("--config", default="",
+                    help="config yaml (생략 시 ckpt 내부의 config 사용)")
+    ap.add_argument("--image", required=True, help="이미지 경로")
+    ap.add_argument("--region", required=True,
+                    help="부위 이름 (FOREHEAD, L_EYE, R_EYE, L_CHEEK, R_CHEEK, LIP, CHIN, GLABELLA, PART_0)")
+    ap.add_argument("--sensor", action="append", default=[],
+                    metavar="KEY=VAL", help="센서 값. 여러 개 가능: --sensor moisture=42.5 --sensor illuminance=320")
+    ap.add_argument("--bbox", default="",
+                    help="x1,y1,x2,y2 형식. 없으면 이미지 전체 사용")
+    ap.add_argument("--probs", action="store_true",
+                    help="분류 헤드별 softmax 확률 함께 출력")
+    ap.add_argument("--out", default="",
+                    help="결과 JSON 저장 경로 (기본: stdout 만)")
+    args = ap.parse_args()
+
+    model = DamdaInferenceModel(
+        checkpoint_path=args.checkpoint,
+        config_path=args.config or None,
+    )
+
+    sensor = _parse_sensor_args(args.sensor) if args.sensor else None
+    bbox = _parse_bbox(args.bbox) if args.bbox else None
+
+    result = model.predict(
+        image_path=args.image,
+        region=args.region,
+        sensor=sensor,
+        bbox=bbox,
+        return_probs=args.probs,
+    )
+
+    # ---- 콘솔 출력 ----
+    print()
+    print(f"========== Inference ({result['meta']['region']}) ==========")
+    print(f"  ckpt epoch     : {result['meta']['ckpt_epoch']}")
+    print(f"  sensor used    : {result['meta']['sensor_inputs_used']} (provided: {list(sensor or {})})")
+    print()
+    print("  Regression (denormalized):")
+    for name, val in result["regression"].items():
+        print(f"    {name:24s} = {val:.3f}")
+    print()
+    print("  Classification (predicted class):")
+    for name, cls in result["classification"].items():
+        line = f"    {name:24s} = {cls}"
+        if args.probs:
+            probs = result["classification_probs"][name]
+            top = sorted(enumerate(probs), key=lambda x: -x[1])[:3]
+            top_str = ", ".join(f"{i}:{p:.2f}" for i, p in top)
+            line += f"   (top3: {top_str})"
+        print(line)
+    print()
+
+    # ---- (선택) JSON 저장 ----
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(result, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"결과 JSON 저장: {out_path}")
+
+
+if __name__ == "__main__":
+    main()

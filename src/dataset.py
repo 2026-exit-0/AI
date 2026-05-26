@@ -9,12 +9,14 @@ losses.py에서 손실 계산에서 제외한다.
 
 from __future__ import annotations
 
+import io
+import random
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
-from PIL import Image
+from PIL import Image, ImageFilter
 from torch.utils.data import Dataset
 from torchvision import transforms
 
@@ -23,13 +25,111 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
-def build_transforms(image_size: int = 224, train: bool = True) -> transforms.Compose:
+class JPEGCompress:
+    """JPEG 압축 시뮬 — 무작위 quality 로 한 번 인코딩/디코딩 거쳐 압축 artifact 주입.
+
+    ESP32-CAM (OV2640) 의 강한 JPEG 압축 (대역폭 절감 목적) 재현용.
+    """
+
+    def __init__(self, quality_range: Tuple[int, int] = (30, 70), p: float = 0.7):
+        self.quality_range = quality_range
+        self.p = p
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if random.random() > self.p:
+            return img
+        q = random.randint(self.quality_range[0], self.quality_range[1])
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=q)
+        buf.seek(0)
+        return Image.open(buf).convert("RGB")
+
+
+class LowResSimulate:
+    """저해상도 다운샘플 -> 업샘플로 디테일 손실 재현.
+
+    ESP32-CAM 의 부위 crop 후 실해상도 (~100-200px) 를 224x224 로 강제 업샘플하면
+    디테일이 사라지는 효과 재현.
+    """
+
+    def __init__(self, low_range: Tuple[int, int] = (64, 128), p: float = 0.5):
+        self.low_range = low_range
+        self.p = p
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if random.random() > self.p:
+            return img
+        target_size = random.randint(self.low_range[0], self.low_range[1])
+        w, h = img.size
+        if min(w, h) <= target_size:
+            return img
+        down = img.resize((target_size, target_size), Image.BILINEAR)
+        up = down.resize((w, h), Image.BILINEAR)
+        return up
+
+
+class GaussianBlurRandom:
+    """가벼운 Gaussian blur — OV2640 의 부드러운 출력 + 미세 손떨림 재현."""
+
+    def __init__(self, radius_range: Tuple[float, float] = (0.3, 1.2), p: float = 0.5):
+        self.radius_range = radius_range
+        self.p = p
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if random.random() > self.p:
+            return img
+        r = random.uniform(self.radius_range[0], self.radius_range[1])
+        return img.filter(ImageFilter.GaussianBlur(radius=r))
+
+
+class GaussianNoiseTensor:
+    """텐서 변환 후 적용하는 Gaussian noise — OV2640 의 노이즈 (특히 저조도) 재현."""
+
+    def __init__(self, std_range: Tuple[float, float] = (0.0, 0.05), p: float = 0.6):
+        self.std_range = std_range
+        self.p = p
+
+    def __call__(self, t: torch.Tensor) -> torch.Tensor:
+        if random.random() > self.p:
+            return t
+        std = random.uniform(self.std_range[0], self.std_range[1])
+        if std <= 0:
+            return t
+        return (t + torch.randn_like(t) * std).clamp(0.0, 1.0)
+
+
+def build_transforms(
+    image_size: int = 224,
+    train: bool = True,
+    augment_mode: str = "normal",
+) -> transforms.Compose:
     """ResNet-50 표준 전처리.
 
     학습 시 중간 강도 증강 적용 — 피부 색감(hue/saturation)은 신호이므로 약하게,
     공간 변형(rotation/crop/flip/erasing)은 일반화 강화에 도움이라 약간 강하게.
+
+    Args:
+        augment_mode:
+            'normal'  — 기본 학습 증강 (v1~v4 와 동일).
+            'scanner' — ESP32-CAM 시연 환경 시뮬. 'normal' 위에
+                        저해상도 시뮬 + Gaussian blur + ColorJitter 강화 +
+                        JPEG compression + Gaussian noise 를 추가.
+                        도메인 갭 (AI-Hub 학습 vs ESP32-CAM 시연) 대비.
+                        Phase 2 / v5 부터 사용 예정. 상세는 NOTES.md 8절 참고.
     """
-    if train:
+    if not train:
+        # 평가/추론 transform 은 augment_mode 와 무관 — 결정론적
+        return transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        ])
+
+    mode = (augment_mode or "normal").lower()
+    if mode not in ("normal", "scanner"):
+        raise ValueError(f"augment_mode 는 'normal' | 'scanner' 만 허용 (got: {augment_mode!r})")
+
+    if mode == "normal":
         return transforms.Compose([
             transforms.Resize((image_size + 24, image_size + 24)),
             transforms.RandomCrop(image_size),
@@ -40,10 +140,26 @@ def build_transforms(image_size: int = 224, train: bool = True) -> transforms.Co
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
             transforms.RandomErasing(p=0.25, scale=(0.02, 0.10), ratio=(0.5, 2.0)),
         ])
+
+    # mode == "scanner" — ESP32-CAM 시연 환경 시뮬레이션
     return transforms.Compose([
-        transforms.Resize((image_size, image_size)),
+        transforms.Resize((image_size + 24, image_size + 24)),
+        transforms.RandomCrop(image_size),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomRotation(degrees=10),
+        # 저해상도 (다운->업샘플로 디테일 손실)
+        LowResSimulate(low_range=(64, 128), p=0.6),
+        # 블러 (카메라 + 미세 떨림)
+        GaussianBlurRandom(radius_range=(0.3, 1.2), p=0.5),
+        # 색 정확도 저하 (OV2640 특성) — normal 대비 brightness/contrast 강화
+        transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.10, hue=0.03),
+        # JPEG 압축 artifact (대역폭 절감 목적의 강 압축)
+        JPEGCompress(quality_range=(30, 70), p=0.7),
         transforms.ToTensor(),
+        # Gaussian noise (저조도시 강함)
+        GaussianNoiseTensor(std_range=(0.0, 0.05), p=0.6),
         transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        transforms.RandomErasing(p=0.25, scale=(0.02, 0.10), ratio=(0.5, 2.0)),
     ])
 
 
@@ -104,6 +220,17 @@ def compute_regression_stats(
     return stats
 
 
+def compute_sensor_stats(
+    df: pd.DataFrame, sensor_inputs: List[str]
+) -> Dict[str, Dict[str, float]]:
+    """학습셋에서 sensor 입력별 평균/std 계산. 정규화에 사용.
+
+    compute_regression_stats 와 같은 형태로 반환 (재활용 가능).
+    Phase 2 / v5+ 의 ESP32-CAM 시연 환경 통합용.
+    """
+    return compute_regression_stats(df, sensor_inputs)
+
+
 class DamdaSkinDataset(Dataset):
     """담다 피부 데이터셋.
 
@@ -113,9 +240,12 @@ class DamdaSkinDataset(Dataset):
       regression:       (R,) float tensor — 결측은 0, 정규화된 값
       regression_mask:  (R,) float tensor — 결측은 0, 유효는 1
       classification:   dict[str -> long tensor (scalar)] — 결측은 -1
+      sensor:           (S,) float tensor — 결측은 0, 정규화된 값 (sensor_inputs 가 빈 리스트면 (0,))
+      sensor_mask:      (S,) float tensor — 결측은 0, 유효는 1
       meta:             dict (subject_id, gender, age 등 디버깅용)
 
     회귀 타겟은 regression_stats(mean/std)로 표준화. 추론 시 denormalize 필요.
+    Phase 2 / v5+ 의 sensor 통합: sensor_inputs 컬럼명 리스트 + sensor_stats 로 정규화.
     """
 
     def __init__(
@@ -126,14 +256,23 @@ class DamdaSkinDataset(Dataset):
         image_size: int = 224,
         train: bool = True,
         regression_stats: Dict[str, Dict[str, float]] = None,
+        augment_mode: str = "normal",
+        sensor_inputs: List[str] = None,
+        sensor_stats: Dict[str, Dict[str, float]] = None,
     ):
         self.df = manifest_df.reset_index(drop=True)
         self.regression_targets = regression_targets
         self.classification_heads = classification_heads
-        self.transform = build_transforms(image_size, train)
+        self.augment_mode = augment_mode
+        self.transform = build_transforms(image_size, train, augment_mode=augment_mode)
         # 회귀 정규화 통계 (train.py 에서 학습셋 기준으로 계산해 주입)
         self.regression_stats = regression_stats or {
             col: {"mean": 0.0, "std": 1.0} for col in regression_targets
+        }
+        # Sensor 입력 (v5+, Phase 2). 빈 리스트면 sensor 비활성 (model.sensor_dim=0 필요)
+        self.sensor_inputs = list(sensor_inputs or [])
+        self.sensor_stats = sensor_stats or {
+            col: {"mean": 0.0, "std": 1.0} for col in self.sensor_inputs
         }
 
     def __len__(self) -> int:
@@ -185,7 +324,7 @@ class DamdaSkinDataset(Dataset):
         regression_mask = torch.tensor(reg_mask, dtype=torch.float32)
 
         # ----- 분류 라벨 (0-base 가정, 결측은 -1 = ignore_index) -----
-        # 실데이터(JSON) 확인: skin_type=0 같이 0-base 값 존재 → -1 보정하지 않음.
+        # 실데이터(JSON) 확인: skin_type=0 같이 0-base 값 존재 -> -1 보정하지 않음.
         classification = {}
         for col, num_cls in self.classification_heads.items():
             v = row.get(col)
@@ -197,12 +336,33 @@ class DamdaSkinDataset(Dataset):
                 cls_idx = max(0, min(num_cls - 1, cls_idx))
                 classification[col] = torch.tensor(cls_idx, dtype=torch.long)
 
+        # ----- 센서 입력 (v5+, Phase 2) — 정규화 + mask -----
+        if self.sensor_inputs:
+            s_values, s_mask = [], []
+            for col in self.sensor_inputs:
+                v = row.get(col)
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    s_values.append(0.0)
+                    s_mask.append(0.0)
+                else:
+                    st = self.sensor_stats.get(col, {"mean": 0.0, "std": 1.0})
+                    s_values.append((float(v) - st["mean"]) / st["std"])
+                    s_mask.append(1.0)
+            sensor = torch.tensor(s_values, dtype=torch.float32)
+            sensor_mask = torch.tensor(s_mask, dtype=torch.float32)
+        else:
+            # sensor 비활성 — placeholder. collate 에서 무시되거나 model.sensor_dim=0 일 때만 통과
+            sensor = torch.zeros(0, dtype=torch.float32)
+            sensor_mask = torch.zeros(0, dtype=torch.float32)
+
         return {
             "image": img_tensor,
             "region_id": region_id,
             "regression": regression,
             "regression_mask": regression_mask,
             "classification": classification,
+            "sensor": sensor,
+            "sensor_mask": sensor_mask,
             "meta": {
                 "subject_id": str(row.get("subject_id", "")),
                 "region": str(row.get("region", "")),
@@ -250,7 +410,7 @@ def split_manifest(
 
 
 def collate_fn(batch: List[dict]) -> dict:
-    """배치 collate — classification 사전을 텐서로 묶음."""
+    """배치 collate — classification 사전을 텐서로 묶음. sensor 도 함께 묶음 (v5+)."""
     images = torch.stack([b["image"] for b in batch])
     region_ids = torch.stack([b["region_id"] for b in batch])
     regression = torch.stack([b["regression"] for b in batch])
@@ -259,10 +419,16 @@ def collate_fn(batch: List[dict]) -> dict:
     cls_keys = batch[0]["classification"].keys()
     classification = {k: torch.stack([b["classification"][k] for b in batch]) for k in cls_keys}
 
+    # sensor — shape (S,) per sample. S=0 인 경우엔 빈 텐서.
+    sensor = torch.stack([b["sensor"] for b in batch])             # (B, S)
+    sensor_mask = torch.stack([b["sensor_mask"] for b in batch])   # (B, S)
+
     return {
         "image": images,
         "region_id": region_ids,
         "regression": regression,
         "regression_mask": regression_mask,
         "classification": classification,
+        "sensor": sensor,
+        "sensor_mask": sensor_mask,
     }

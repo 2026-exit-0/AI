@@ -88,7 +88,16 @@ class DamdaSkinModel(nn.Module):
         image: torch.Tensor,
         region_id: torch.Tensor,
         sensor: Optional[torch.Tensor] = None,
+        sensor_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
+        """순전파.
+
+        Args:
+            sensor: (B, sensor_dim). sensor_dim > 0 인 경우 필수.
+            sensor_mask: (B,) 또는 (B, sensor_dim) — 1=valid, 0=결측.
+                None 이면 모두 valid 로 간주. 결측 sensor 의 sens_feat 은
+                0으로 마스킹되어 fused trunk 가 결측 행에서는 sensor 영향 받지 않음.
+        """
         img_feat = self.backbone(image)              # (B, 2048)
         reg_emb = self.region_embedding(region_id)   # (B, 16)
 
@@ -97,7 +106,17 @@ class DamdaSkinModel(nn.Module):
         if self.sensor_branch is not None:
             if sensor is None:
                 raise ValueError("sensor_dim > 0 이지만 sensor 입력이 None")
-            sens_feat = self.sensor_branch(sensor)
+            sens_feat = self.sensor_branch(sensor)   # (B, sensor_emb_dim)
+            if sensor_mask is not None:
+                # mask 모양 정규화: (B,) → (B, 1) 로 broadcast
+                if sensor_mask.dim() == 1:
+                    m = sensor_mask.unsqueeze(1)
+                elif sensor_mask.dim() == 2 and sensor_mask.shape[1] != 1:
+                    # (B, sensor_dim) 마스크면 행 단위 AND 로 축소 (모두 valid 일 때만 1)
+                    m = (sensor_mask.sum(dim=1, keepdim=True) > 0).float()
+                else:
+                    m = sensor_mask
+                sens_feat = sens_feat * m
             feats.append(sens_feat)
 
         fused = torch.cat(feats, dim=1)
