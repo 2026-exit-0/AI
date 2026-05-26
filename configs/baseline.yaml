@@ -1,4 +1,12 @@
-# damda AI Baseline 학습 설정 (GPU 환경, v4)
+# damda AI Baseline 학습 설정 (GPU 환경, v5)
+#
+# v5 변경 사항 (v4 → v5):
+#   - augment_mode: normal → scanner  (ESP32-CAM 시연 환경 시뮬, 도메인 갭 mitigation)
+#   - sensor_inputs: [] → [moisture]  (FDC2112 수분 센서 입력, Phase 2 통합)
+#   - regression_targets: moisture 제거 (sensor 로 이동, data leakage 방지)
+#   - classification_loss: focal → ce (v4 의 일괄 focal γ=2 가 test set 에서 regression 확인됨)
+#   - focal_gamma: 0.0 (ce 사용 시 무시되지만 명시)
+# v5 가설 / scope / 평가 기준은 PROGRESS.md §6 참고
 
 seed: 42
 
@@ -11,20 +19,21 @@ data:
   test_split: 0.10
   split_by: id            # 'id' (대상자 단위) — 같은 사람이 train/val 섞이지 않음
 
-  # v5+: ESP32-CAM 시연 환경 도메인 갭 대비.
+  # v5: ESP32-CAM 시연 환경 도메인 갭 대비 ON.
   # 'normal' (v1~v4) — 기본 학습 증강 (Resize/Crop/Flip/Rotation/ColorJitter/Erasing)
-  # 'scanner'        — 위 + LowResSimulate + GaussianBlur + ColorJitter 강화 + JPEG compress + GaussianNoise
+  # 'scanner' (v5+)  — 위 + LowResSimulate + GaussianBlur + ColorJitter 강화 + JPEG compress + GaussianNoise
   #                    AI-Hub (스튜디오) ↔ ESP32-CAM (OV2640, 640×480, 강 JPEG, 저조도 노이즈) 갭 mitigation
   # 자세한 갭 분석은 NOTES.md §8 참고. eval/test 추론 시엔 무관 (결정론적).
-  augment_mode: normal
+  augment_mode: scanner
 
-  # v5+: 센서 입력 학습 (Phase 2). manifest 의 컬럼명 리스트.
-  # 빈 리스트 [] (또는 미지정) 이면 sensor 비활성 — model.sensor_dim=0, v1~v4 와 동일 동작.
-  # 시연 하드웨어와의 매핑 (NOTES.md §8 참고):
-  #   - moisture (FDC2112 정전용량 수분 센서 매핑)
-  #   - 조도 컬럼은 AI-Hub 에 없음 → 시연 시점에만 VEML7700 값을 사용 (학습은 moisture 만)
-  # 학습 시 결측 행은 sensor_mask=0 으로 처리 (model.py 의 sensor_branch 가 마스킹 적용).
-  sensor_inputs: []
+  # v5: 센서 입력 학습 (Phase 2) ON.
+  # 학습: AI-Hub manifest 의 measurement 컬럼 (moisture) 을 sensor 자리에 주입
+  # 추론: ESP32-CAM 의 FDC2112 (정전용량 수분 센서) 가 같은 자리에 실시간 측정값 입력
+  # 단위 캘리브레이션: FDC2112 ↔ AI-Hub corneometer 변환식은 별도 작업 (PROGRESS §6 의존성 참고)
+  # 결측 행은 sensor_mask=0 처리 → model.py 의 sensor_branch 가 마스킹 적용.
+  # ⚠ sensor_inputs 의 컬럼명은 regression_targets 와 절대 겹치면 안 됨 (data leakage)
+  sensor_inputs:
+    - moisture
 
 # ===== Model =====
 model:
@@ -33,13 +42,16 @@ model:
   region_emb_dim: 16
   num_regions: 9          # PART_0, FOREHEAD, GLABELLA, L_EYE, R_EYE, L_CHEEK, R_CHEEK, LIP, CHIN
   dropout: 0.2
+  sensor_emb_dim: 32      # sensor_branch 의 hidden + 출력 차원. sensor_dim=1 → 입력 1차원, 출력 32 차원
 
   # v3: build_manifest.py 수정으로 다음 두 값을 부위 특화로 채움:
   #   - pigmentation_value: PART_0 의 pigmentation_count (전체 얼굴 색소반점 개수)
   #   - wrinkle_value:      L_EYE/R_EYE 의 *_wrinkle_Ra (평균 거칠기)
   # 다른 부위는 NaN → dataset.py 에서 mask=0 으로 자동 제외 (정상 동작)
+  #
+  # v5: moisture 제거 (sensor 입력으로 이동, data leakage 방지). 4개 헤드.
+  # 시연 시 moisture 값은 FDC2112 가 직접 표시 — 모델 예측 아님.
   regression_targets:
-    - moisture
     - elasticity_mean
     - pore_value
     - pigmentation_value
@@ -60,7 +72,7 @@ training:
   epochs: 50              # 30→50: overfit 신호 없어 더 길게 (early_stop이 안전망)
   batch_size: 16          # RTX 5060 8GB VRAM 기준 안전치 (OOM 시 12 또는 8로)
   optimizer: adam
-  lr: 0.0008              # v3: 0.0006→0.0008. cosine 활용은 유지하되 약간 회복
+  lr: 0.0008              # v3 검증값 유지
   weight_decay: 0.0001
   scheduler: cosine       # cosine | step | none
   warmup_epochs: 1
@@ -68,16 +80,15 @@ training:
   regression_weight: 1.0
   classification_weight: 0.5
 
-  # v3: false. v2에서 분류 전반 악화 (pore +0.08, pigmentation +0.07, dryness +0.03)이고
-  # 약한 헤드(wrinkle/skin_type/sensitive)도 개선 안 됨 → balanced 가중치 역효과.
-  # v4: false 유지. focal loss 로 약한 헤드 처치 (아래 classification_loss 참고).
+  # v3: false. v2에서 분류 전반 악화이고 약한 헤드도 개선 안 됨 → balanced 가중치 역효과.
+  # v4: false 유지. focal loss 로 약한 헤드 처치 시도 (실패).
+  # v5: false 유지.
   use_class_weights: false
 
-  # v4: 분류 손실 종류. 'ce' | 'focal'. focal 은 hard example 에 손실 집중 (γ=focal_gamma).
-  # γ=0 이면 CE 와 수학적 동일. 7개 분류 헤드에 일괄 적용.
-  # 의도: cls_skin_type (1.5057) / cls_wrinkle_grade (1.1962) 개선.
-  classification_loss: focal
-  focal_gamma: 2.0
+  # v4: focal γ=2.0 → test set 에서 전 헤드 regression 확인됨 (skin_type F1 -11.6%, 회귀 4개 동반 악화).
+  # v5: ce 복귀 (v3 와 동일). 약한 헤드 처치는 v5.5+ 별도 실험 (PROGRESS §5 참고)
+  classification_loss: ce
+  focal_gamma: 0.0        # ce 사용 시 무시됨. 명시적으로 0
 
   # Early stopping — val/loss/total 이 N epoch 동안 개선 없으면 종료. 0=비활성
   early_stop_patience: 8

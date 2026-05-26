@@ -255,6 +255,14 @@ def main():
     sensor_dim = len(sensor_inputs)
     sensor_stats: Dict[str, Dict[str, float]] = {}
     if sensor_dim > 0:
+        # 안전 체크: sensor_inputs 와 regression_targets 가 겹치면 data leakage
+        # (모델이 sensor 입력값을 회귀 출력으로 그대로 echo 학습 → 추론 시 sensor 없으면 망함)
+        overlap = set(sensor_inputs) & set(regression_targets)
+        if overlap:
+            raise ValueError(
+                f"data leakage 가능성: 다음 컬럼이 sensor_inputs 와 regression_targets 양쪽에 있음: "
+                f"{sorted(overlap)}. 한쪽에서 제거할 것 (시연용이면 regression_targets 에서 제거 권장)."
+            )
         from .dataset import compute_sensor_stats
         sensor_stats = compute_sensor_stats(train_df, sensor_inputs)
         logger.info(f"sensor_inputs = {sensor_inputs}  (sensor_dim={sensor_dim})")
