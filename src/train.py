@@ -65,6 +65,17 @@ def make_scheduler(optimizer, cfg: dict, num_epochs: int):
 
 # ---------------- Loops ----------------
 
+def _forward_with_sensor(model, batch):
+    """sensor_dim>0 일 때 sensor + sensor_mask 도 전달. v5+ Phase 2 통합."""
+    if getattr(model, "sensor_dim", 0) > 0 and "sensor" in batch:
+        return model(
+            batch["image"], batch["region_id"],
+            sensor=batch["sensor"],
+            sensor_mask=batch.get("sensor_mask"),
+        )
+    return model(batch["image"], batch["region_id"])
+
+
 def train_one_epoch(model, loader, optimizer, scaler, device, cfg, writer, global_step, epoch,
                     class_weights=None, regression_targets=None):
     model.train()
@@ -76,7 +87,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device, cfg, writer, globa
 
         if use_amp:
             with torch.cuda.amp.autocast(enabled=True):
-                out = model(batch["image"], batch["region_id"])
+                out = _forward_with_sensor(model, batch)
                 loss, info = multitask_loss(
                     out, batch,
                     regression_weight=cfg["training"]["regression_weight"],
@@ -90,7 +101,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device, cfg, writer, globa
             scaler.step(optimizer)
             scaler.update()
         else:
-            out = model(batch["image"], batch["region_id"])
+            out = _forward_with_sensor(model, batch)
             loss, info = multitask_loss(
                 out, batch,
                 regression_weight=cfg["training"]["regression_weight"],
@@ -119,7 +130,7 @@ def evaluate(model, loader, device, cfg, writer, epoch, tag: str = "val",
     n = 0
     for batch in tqdm(loader, desc=f"[{tag} ep{epoch}]", ncols=100):
         batch = move_to_device(batch, device)
-        out = model(batch["image"], batch["region_id"])
+        out = _forward_with_sensor(model, batch)
         _, info = multitask_loss(
             out, batch,
             regression_weight=cfg["training"]["regression_weight"],
@@ -235,12 +246,35 @@ def main():
     else:
         logger.info("분류 손실: ce")
 
+    # augment_mode: 'normal' (기본) | 'scanner' (ESP32-CAM 시연 환경 시뮬, v5+)
+    augment_mode = cfg["data"].get("augment_mode", "normal")
+    logger.info(f"augment_mode = {augment_mode}")
+
+    # sensor 입력 (v5+, Phase 2). 빈 리스트면 sensor 비활성 → model.sensor_dim=0
+    sensor_inputs = cfg["data"].get("sensor_inputs", []) or []
+    sensor_dim = len(sensor_inputs)
+    sensor_stats: Dict[str, Dict[str, float]] = {}
+    if sensor_dim > 0:
+        from .dataset import compute_sensor_stats
+        sensor_stats = compute_sensor_stats(train_df, sensor_inputs)
+        logger.info(f"sensor_inputs = {sensor_inputs}  (sensor_dim={sensor_dim})")
+        for col, s in sensor_stats.items():
+            logger.info(f"  {col:22s} mean={s['mean']:.3f}  std={s['std']:.3f}")
+    else:
+        logger.info("sensor_inputs 비활성 (sensor_dim=0)")
+
     train_ds = DamdaSkinDataset(train_df, regression_targets, classification_heads,
                                 image_size=cfg["data"]["image_size"], train=True,
-                                regression_stats=regression_stats)
+                                regression_stats=regression_stats,
+                                augment_mode=augment_mode,
+                                sensor_inputs=sensor_inputs,
+                                sensor_stats=sensor_stats)
     val_ds   = DamdaSkinDataset(val_df,   regression_targets, classification_heads,
                                 image_size=cfg["data"]["image_size"], train=False,
-                                regression_stats=regression_stats)
+                                regression_stats=regression_stats,
+                                augment_mode=augment_mode,
+                                sensor_inputs=sensor_inputs,
+                                sensor_stats=sensor_stats)
 
     pin = device.type == "cuda"
     train_loader = DataLoader(train_ds, batch_size=cfg["training"]["batch_size"],
@@ -251,6 +285,7 @@ def main():
                               collate_fn=collate_fn, pin_memory=pin)
 
     # ----- Model -----
+    # sensor_dim 은 위에서 cfg["data"]["sensor_inputs"] 기반으로 계산됨. Phase 1 (v1~v4) = 0.
     model = DamdaSkinModel(
         backbone=model_cfg["backbone"],
         pretrained=model_cfg["pretrained"],
@@ -259,7 +294,8 @@ def main():
         regression_targets=regression_targets,
         classification_heads=classification_heads,
         dropout=model_cfg.get("dropout", 0.2),
-        sensor_dim=0,  # Phase 1: 센서 없음
+        sensor_dim=sensor_dim,
+        sensor_emb_dim=model_cfg.get("sensor_emb_dim", 32),
     ).to(device)
     logger.info(f"model params: {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
 
@@ -331,6 +367,8 @@ def main():
                 "val_metrics": val_metrics,
                 "config": cfg,
                 "regression_stats": regression_stats,
+                "sensor_stats": sensor_stats,
+                "sensor_inputs": sensor_inputs,
             }, ckpt_path)
             logger.info(f"체크포인트 저장: {ckpt_path}")
 

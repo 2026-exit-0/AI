@@ -11,6 +11,21 @@ data:
   test_split: 0.10
   split_by: id            # 'id' (대상자 단위) — 같은 사람이 train/val 섞이지 않음
 
+  # v5+: ESP32-CAM 시연 환경 도메인 갭 대비.
+  # 'normal' (v1~v4) — 기본 학습 증강 (Resize/Crop/Flip/Rotation/ColorJitter/Erasing)
+  # 'scanner'        — 위 + LowResSimulate + GaussianBlur + ColorJitter 강화 + JPEG compress + GaussianNoise
+  #                    AI-Hub (스튜디오) ↔ ESP32-CAM (OV2640, 640×480, 강 JPEG, 저조도 노이즈) 갭 mitigation
+  # 자세한 갭 분석은 NOTES.md §8 참고. eval/test 추론 시엔 무관 (결정론적).
+  augment_mode: normal
+
+  # v5+: 센서 입력 학습 (Phase 2). manifest 의 컬럼명 리스트.
+  # 빈 리스트 [] (또는 미지정) 이면 sensor 비활성 — model.sensor_dim=0, v1~v4 와 동일 동작.
+  # 시연 하드웨어와의 매핑 (NOTES.md §8 참고):
+  #   - moisture (FDC2112 정전용량 수분 센서 매핑)
+  #   - 조도 컬럼은 AI-Hub 에 없음 → 시연 시점에만 VEML7700 값을 사용 (학습은 moisture 만)
+  # 학습 시 결측 행은 sensor_mask=0 으로 처리 (model.py 의 sensor_branch 가 마스킹 적용).
+  sensor_inputs: []
+
 # ===== Model =====
 model:
   backbone: resnet50

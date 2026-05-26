@@ -45,6 +45,7 @@ from .dataset import (
     DamdaSkinDataset,
     collate_fn,
     compute_regression_stats,
+    compute_sensor_stats,
     split_manifest,
 )
 from .model import DamdaSkinModel
@@ -220,7 +221,10 @@ def run_inference(
     regression_targets: List[str],
     classification_heads: Dict[str, int],
 ) -> dict:
-    """전체 loader 순회하며 예측/정답/마스크/region_id 누적."""
+    """전체 loader 순회하며 예측/정답/마스크/region_id 누적.
+
+    model.sensor_dim > 0 이면 sensor + sensor_mask 도 forward 에 전달 (v5+).
+    """
     model.eval()
 
     reg_preds, reg_targets, reg_masks = [], [], []
@@ -228,11 +232,20 @@ def run_inference(
     cls_targets = {name: [] for name in classification_heads}
     region_ids = []
 
+    use_sensor = getattr(model, "sensor_dim", 0) > 0
+
     for batch in tqdm(loader, desc="[eval]", ncols=100):
         img = batch["image"].to(device, non_blocking=True)
         rid = batch["region_id"].to(device, non_blocking=True)
 
-        out = model(img, rid)
+        if use_sensor:
+            sens = batch["sensor"].to(device, non_blocking=True)
+            sens_mask = batch.get("sensor_mask")
+            if sens_mask is not None:
+                sens_mask = sens_mask.to(device, non_blocking=True)
+            out = model(img, rid, sensor=sens, sensor_mask=sens_mask)
+        else:
+            out = model(img, rid)
 
         if "regression" in out and regression_targets:
             reg_preds.append(out["regression"].cpu().numpy())
@@ -445,6 +458,14 @@ def main() -> None:
     regression_targets = model_cfg["regression_targets"]
     classification_heads = model_cfg["classification_heads"]
 
+    # ckpt 먼저 열어서 sensor_dim 결정 (v5+ 의 sensor 학습된 모델 호환)
+    ckpt = torch.load(args.checkpoint, map_location=device)
+    ckpt_sensor_inputs = ckpt.get("sensor_inputs", []) or []
+    # cfg 의 sensor_inputs 보다 ckpt 의 것이 우선 (학습 시 실제 사용된 sensor 가 ground truth)
+    sensor_inputs = ckpt_sensor_inputs if ckpt_sensor_inputs \
+                    else (cfg["data"].get("sensor_inputs", []) or [])
+    sensor_dim = len(sensor_inputs)
+
     model = DamdaSkinModel(
         backbone=model_cfg["backbone"],
         pretrained=False,  # 어차피 ckpt 로 덮어쓸 거라 ImageNet 다운로드 불필요
@@ -453,13 +474,13 @@ def main() -> None:
         regression_targets=regression_targets,
         classification_heads=classification_heads,
         dropout=model_cfg.get("dropout", 0.2),
-        sensor_dim=0,
+        sensor_dim=sensor_dim,
+        sensor_emb_dim=model_cfg.get("sensor_emb_dim", 32),
     ).to(device)
 
-    ckpt = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(ckpt["model"])
     ckpt_epoch = int(ckpt.get("epoch", -1))
-    logger.info(f"checkpoint 로드 완료 (epoch={ckpt_epoch})")
+    logger.info(f"checkpoint 로드 완료 (epoch={ckpt_epoch}, sensor_dim={sensor_dim})")
 
     # regression_stats — ckpt 우선, 없으면 train_df 로 재계산
     if "regression_stats" in ckpt:
@@ -469,11 +490,24 @@ def main() -> None:
         regression_stats = compute_regression_stats(train_df, regression_targets)
         logger.info("regression_stats 재계산 (ckpt 에 없음 — train_df 기준)")
 
+    # sensor_stats — ckpt 우선, 없으면 train_df 로 재계산
+    if sensor_dim > 0:
+        if "sensor_stats" in ckpt and ckpt["sensor_stats"]:
+            sensor_stats = ckpt["sensor_stats"]
+            logger.info("sensor_stats 복원 (ckpt 내부)")
+        else:
+            sensor_stats = compute_sensor_stats(train_df, sensor_inputs)
+            logger.info("sensor_stats 재계산 (ckpt 에 없음 — train_df 기준)")
+    else:
+        sensor_stats = {}
+
     # ---- Dataset / DataLoader (train=False, no shuffle) ----
     ds = DamdaSkinDataset(
         target_df, regression_targets, classification_heads,
         image_size=cfg["data"]["image_size"], train=False,
         regression_stats=regression_stats,
+        sensor_inputs=sensor_inputs,
+        sensor_stats=sensor_stats,
     )
     loader = DataLoader(
         ds,

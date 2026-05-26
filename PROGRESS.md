@@ -413,7 +413,63 @@ v3 결과에서 약한 헤드의 절대값과 v1→v3 개선폭이 명확해짐.
 
 ---
 
-## 6. 메타: 학습/실험 워크플로우 개선
+## 6. 시연 로드맵 — Phase 2 (2026-06 중순 프로토타입 시연)
+
+### 시연 목표
+
+자체 제작 스캐너 (**ESP32-CAM + FDC2112 수분 센서 + VEML7700 조도 센서 + 백색/UV LED**) 로 사용자가 부위별로 피부를 측정 → Wi-Fi 전송 → 모델 추론 → UI 에 측정값 + 등급 표시.
+
+스펙 / 갭 분석 / 시연 시나리오 상세는 NOTES.md §8 참고.
+
+### 실존적 리스크 — 도메인 갭
+
+AI-Hub 028 의 스튜디오급 사진으로 학습한 모델이 ESP32-CAM 의 저해상도/JPEG 압축/저정확도 색 출력에서 성능 폭락하는 게 거의 확정. v1~v5 의 학습 최적화는 부차적이고, **도메인 갭 mitigation 이 시연 성패의 결정 요인**.
+
+### 3주 작업 분할 (2026-05-26 기준)
+
+**Week 1 (5/26 ~ 6/1) — 인프라 + 도메인 갭 대비**
+- ✅ `src/evaluate.py` (2026-05-26) — held-out test set 평가
+- ⬜ scanner-matched augmentation 파이프라인 (`dataset.py build_transforms(augment_mode='scanner')`)
+- ⬜ 센서 입력 학습 파이프라인 (`model.py sensor_branch` 활성화, sensor_dim=2)
+- ⬜ `src/infer.py` — 시연용 단일 추론 entry
+- ⬜ v4 학습 완주 (~05-28) + evaluate.py 로 v3 vs v4 분석
+- ⏳ (병렬) ESP32-CAM 50건 페어 데이터 수집 (수일 내)
+
+**Week 2 (6/2 ~ 6/8) — v5 학습 + Fine-tune**
+- ⬜ v5 본 학습 — scanner_aug ON + sensor_input ON + 헤드별 focal γ (skin_type γ=3, 나머지 γ=2)
+- ⬜ 50건 ESP32-CAM 데이터로 stage-2 fine-tune (마지막 5 epoch, lr ×0.1)
+- ⬜ AI-Hub 100K vs ESP32-CAM 50건 분포 비교 (KL divergence, t-SNE 시각화)
+- ⬜ v5 evaluate — held-out + ESP32-CAM 50건 두 셋 모두에서
+
+**Week 3 (6/9 ~ 6/15) — 통합 + 데모 리허설**
+- ⬜ Gradio (또는 간단 Flask) UI — 부위 선택 → 사진 + 센서값 받음 → 결과 표시
+- ⬜ ESP32-CAM Wi-Fi 연동 (HTTP polling 또는 WebSocket)
+- ⬜ End-to-end 리허설 — 5번 반복 안정성 확인
+- ⬜ 발표 자료 — 모델 아키텍처 다이어그램 + v1~v5 비교 표 + 데모 시연 시나리오 슬라이드
+
+### v5 scope (현재 시점 잠정)
+
+| 항목 | 변경 | 근거 |
+|---|---|---|
+| scanner-matched augmentation | dataset.py 에 'scanner' 모드 추가 | 도메인 갭 1순위 |
+| 센서 입력 | model.py sensor_branch 활성화 | 하드웨어 ↔ 모델 통합 |
+| 헤드별 focal γ | losses.py focal_gamma 를 dict 로 | v3 약한 헤드 (skin_type) 처치 |
+| best.pt 자동 보관 | train.py 에 best 시점 copy | 운영 편의 |
+| stage-2 fine-tune | ESP32-CAM 50건 마지막 5 epoch | 도메인 적응 |
+
+**v4 결과 보고 결정할 것:**
+- focal γ=2 가 효과 있었다면 v5 에서 헤드별 차등 적용. 효과 없으면 (best.pt + scanner aug + sensor input 만 적용하고) γ 변경은 v6 로
+- cls_sensitive 가 여전히 학습 안 되면 v5 에서 헤드 제거 (정보량 부족 라벨 의심)
+
+### 핵심 의존성 / 차단 요인
+
+- 🟡 **ESP32-CAM 50건 데이터 수신 시점** — Week 2 fine-tune 의 입력. 늦으면 fine-tune 단계 생략하고 scanner_aug 만으로 가야 함
+- 🟡 **FDC2112 ↔ AI-Hub corneometer 단위 캘리브레이션** — 두 측정기로 같은 피부 측정해본 적 없으면 단위 변환식 모름. 캘리브레이션 데이터 없으면 sensor_input 효과 제한적
+- 🔴 **lab PC 안정성** — v5 학습 도중 다시 사망하면 시연까지 시간 부족. NOTES §2 안정성 보장 블록 적용 필수
+
+---
+
+## 7. 메타: 학습/실험 워크플로우 개선
 
 - ✅ per-head 손실 자동 로깅 (`losses.py`)
 - ✅ TB 이벤트 → CSV 덤프 (`dump_tb.py`)
