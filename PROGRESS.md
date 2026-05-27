@@ -1,7 +1,7 @@
 # damda AI 학습 진행 기록
 
 > 졸업 프로젝트 "damda" 의 AI 모델 학습 일지. 각 버전마다 가설 → 변경 → 결과 → 발견 순으로 기록.
-> 마지막 업데이트: 2026-05-26 (v4 종료 — regression 확정, focal 폐기. v5 scope 재정의)
+> 마지막 업데이트: 2026-05-27 (v5 결과 — regression 확정. v5.1 scanner_aug 약화 시작)
 
 ---
 
@@ -447,6 +447,131 @@ PART_0 0.470 (best) > L_EYE 0.539 > R_EYE 0.603 > R_CHEEK 0.748 > L_CHEEK 0.760 
 - `runs/eval/v4_epoch012_test.json` + `.md` — evaluate.py 결과
 - `runs/eval/v3_epoch045_test.json` + `.md` — v3 baseline 재평가
 - `runs/eval/v4_vs_v3.md` — diff 보고서
+
+---
+
+### v5 — Scanner aug + sensor_input + CE (2026-05-27, ❌ 실패)
+
+**가설**
+1. scanner_aug (LowResSimulate + Blur + ColorJitter 강화 + JPEG + Noise) 가 ESP32-CAM 도메인 갭 mitigation
+2. sensor_input (moisture) 가 회귀 정확도 보조 (FDC2112 ↔ AI-Hub corneometer 매핑)
+3. focal 폐기 + CE 복귀로 v4 의 regression 회복
+
+**변경 (v3 대비)**
+- `configs/baseline.yaml`:
+  - `augment_mode: normal → scanner`
+  - `sensor_inputs: [] → [moisture]`
+  - `regression_targets`: moisture 제거 (5개 → 4개, data leakage 방지)
+  - `classification_loss: focal → ce`
+- 그 외 v3 와 동일 (lr 0.0008, batch 16, 50 epoch, no class_weights)
+- data leakage 안전 체크 (`sensor_inputs ∩ regression_targets ≠ ∅` → raise) 추가
+
+**결과**
+- 학습: epoch 36 val/loss/total best 0.8895 (focal 과 달리 CE 라 v3 와 직접 비교 가능), epoch 44 early_stop
+- evaluate.py (test set):
+  ```
+  ========== Eval summary (test, v5) ==========
+    Composite score        : 0.5513    (v3: 0.6461, Δ -0.0948)
+    Reg mean MAE / σ       : 0.685     (v3: 0.619, +0.039)
+    Cls mean macro F1      : 0.236     (v3: 0.266, -0.017)
+  ```
+
+🚨 **v3 대비 명백한 regression. v4 (composite 0.5909) 보다도 더 약함.**
+
+**Per-head diff (v3 → v5, test set)**
+
+회귀 (MAE, 작을수록 좋음):
+| 헤드 | v3 | v5 | Δ | 비고 |
+|---|---:|---:|---:|---|
+| elasticity_mean | 0.021 | 0.022 | +5% | 영향 작음 (거시적) |
+| **pore_value** | 252.5 | **349.1** | **+38%** | ↓↓ 큰 폭 (미세 텍스처) |
+| **pigmentation_value** | 26.3 | **38.2** | **+45%** | ↓↓ 큰 폭 (미세 색 변화) |
+| wrinkle_value | 3.09 | 3.37 | +9% | |
+| (moisture 는 v5 에서 sensor 로 이동, 헤드에서 제외) | | | | |
+
+분류 (Macro F1, 클수록 좋음):
+| 헤드 | v3 | v5 | Δ | 비고 |
+|---|---:|---:|---:|---|
+| **wrinkle_grade** | 0.335 | **0.250** | **-25%** | ↓↓ 최대 악화 (미세 주름 라인) |
+| sagging_grade | 0.250 | 0.208 | -17% | ↓ (윤곽 디테일) |
+| pore_grade | 0.188 | 0.159 | -15% | ↓ (pore_value 형제) |
+| skin_type | 0.190 | 0.170 | -11% | ↓ (약한 헤드) |
+| dryness_grade | 0.160 | 0.146 | -9% | ↓ (약한 헤드) |
+| pigmentation_grade | 0.328 | 0.310 | -5% | 영향 작음 (등급 = 거친 분류) |
+| sensitive | 0.407 | **0.410** | **+0.7%** | ✅ 유일하게 개선 (binary, 시각 의존 낮음) |
+
+**Per-region MAE/σ (v5)**
+PART_0 0.596 → L_EYE 0.593 → R_EYE 0.611 → FOREHEAD 0.643 → **R_CHEEK 0.781 → L_CHEEK 0.813 → CHIN 0.824** (worst). 볼/턱 (pore_value/elasticity 측정 부위) 가 가장 망함.
+
+**진단 — 가설 1 패턴 매우 명확**
+
+**고주파 디테일에 의존하는 헤드만 큰 폭 악화, 거시적 정보 의존 헤드는 보존**:
+- 큰 폭 악화: pore_value, pigmentation_value, wrinkle_grade, sagging_grade, pore_grade (모두 미세 패턴)
+- 보존 또는 개선: elasticity_mean (거시 표면), pigmentation_grade (거친 등급), sensitive (binary)
+
+→ **scanner_aug 의 `LowResSimulate(low_range=(64,128), p=0.6)` 이 주범 거의 확정.** 다운→업샘플로 미세 텍스처 정보 파괴. 다른 aug (Blur p=0.5, JPEG p=0.7, Noise p=0.6) 도 기여하지만 정도 차이.
+
+평균 한 이미지당 ~2.4개 augmentation 적용 → 학습 데이터가 꽤 망가짐 → 모델이 거시 정보만으로 학습 → 디테일 헤드 학습 약해짐.
+
+**가설 2/3 (sensor_input, CE) 효과는 미지수**
+- sensor_input 만 분리 ablation (v5-B) 안 했음 — 효과 유무 단독 검증 불가
+- CE 복귀는 옳은 선택 (v4 focal 보다 v5 가 sensitive F1 보존 등). 단 scanner_aug 가 큰 폭으로 깎아내림
+
+**v5 의 향후 가치**
+- ESP32-CAM 실측 데이터로 평가 안 했음 — clean AI-Hub 에서는 약해도 ESP32 환경에서는 v3 보다 robust 할 가능성 남아있음
+- 단, 50건 페어 데이터 받은 후에야 검증 가능
+
+**다음 단계: v5.1 (augmentation 강도 약화)**
+
+**산출물**
+- `runs/main/` TB 이벤트 (epoch 1~44)
+- `checkpoints/epoch036.pt` — v5 best (test composite 0.5513)
+- `runs/eval/v5_test.json` + `.md` — evaluate.py 결과 (v3 diff 포함)
+
+---
+
+### v5.1 — Scanner aug 강도 약화 (진행 중, 2026-05-27 시작)
+
+**가설**
+v5 의 패턴 분석 (디테일 헤드만 큰 폭 악화) 으로 **`LowResSimulate` 주범 + 전반적 aug 강도 과다** 확정. aug 강도를 ~40% 수준으로 약화하면:
+1. 디테일 헤드 회복 → clean test 성능 v3 동등 또는 약간 약함 수준
+2. scanner robustness 일부는 유지 → ESP32 환경에서 v3 보다 나음 가능성
+
+**변경 (v5 대비)**
+`dataset.py` 의 scanner mode 만 약화 (config yaml 은 변화 없음):
+
+| Augmentation | v5 | v5.1 |
+|---|---|---|
+| LowResSimulate | `low_range=(64,128) p=0.6` | `low_range=(128,192) p=0.3` |
+| GaussianBlurRandom | `radius=(0.3,1.2) p=0.5` | `radius=(0.2,0.8) p=0.3` |
+| ColorJitter (brightness/contrast/sat/hue) | `0.25/0.25/0.10/0.03` (강화) | `0.15/0.15/0.05/0.02` (v3 수준) |
+| JPEGCompress | `quality=(30,70) p=0.7` | `quality=(60,85) p=0.4` |
+| GaussianNoiseTensor | `std=(0,0.05) p=0.6` | `std=(0,0.025) p=0.4` |
+
+평균 한 이미지당 적용되는 aug ~2.4개 → ~1.4개. 전체 강도 약 40% 수준.
+
+**그 외 동일 (v5 와 같음)**
+- `sensor_inputs: [moisture]`
+- `regression_targets`: 4개 (moisture 제외)
+- `classification_loss: ce`
+- lr / batch / epochs / scheduler / weight_decay 동일
+
+**예상**
+- 디테일 헤드 (pore/pigmentation/wrinkle) MAE 가 v3 수준의 ±10% 이내로 회복
+- 분류 평균 F1 0.25~0.27 (v3 0.266 동등 또는 약간 약함)
+- composite 0.62~0.65 (v3 0.6461 ±5%)
+
+**종료 조건**
+- ✅ 성공: composite ≥ 0.62 + pore_value MAE ≤ v3 × 1.1 → v5.1 채택, fine-tune 진행
+- ⚠ 부분: composite 0.58~0.62 → scanner robustness trade-off 로 수용 (시연 모델 후보)
+- ❌ 실패: composite < 0.58 (v5 0.5513 와 큰 차이 없음) → scanner_aug 자체 폐기, v3 ckpt 로 시연 + sensor_input 효과만 ablation (v5-B)
+
+**작업 순서**
+1. v5 산출물 보존 (`ren runs\main main_v5`, `ren checkpoints checkpoints_v5`)
+2. git pull (코드 변경 적용)
+3. validation-mode sanity (~10분)
+4. `train_detach.bat` 본 학습 (~22h)
+5. evaluate.py 평가 + v3 / v5 비교
 
 ---
 

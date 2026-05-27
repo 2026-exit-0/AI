@@ -142,22 +142,29 @@ def build_transforms(
         ])
 
     # mode == "scanner" — ESP32-CAM 시연 환경 시뮬레이션
+    #
+    # v5.1 (2026-05-27): augmentation 강도 ~40% 수준으로 약화.
+    # v5 결과 분석에서 고주파 디테일 의존 헤드 (pore_value +38% MAE, pigmentation_value +45%,
+    # wrinkle_grade -25% F1) 가 명백히 악화 — LowResSimulate 가 미세 텍스처 정보를 파괴한 것이 주범.
+    # 거시적 정보 의존 헤드 (elasticity, pigmentation_grade, sensitive) 는 거의 영향 없었음.
+    # 가설: aug 강도를 줄이면 디테일 헤드 회복 + scanner robustness 일부는 유지 가능.
+    # 상세는 PROGRESS.md §4 v5 / v5.1 절 참고.
     return transforms.Compose([
         transforms.Resize((image_size + 24, image_size + 24)),
         transforms.RandomCrop(image_size),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomRotation(degrees=10),
-        # 저해상도 (다운->업샘플로 디테일 손실)
-        LowResSimulate(low_range=(64, 128), p=0.6),
-        # 블러 (카메라 + 미세 떨림)
-        GaussianBlurRandom(radius_range=(0.3, 1.2), p=0.5),
-        # 색 정확도 저하 (OV2640 특성) — normal 대비 brightness/contrast 강화
-        transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.10, hue=0.03),
-        # JPEG 압축 artifact (대역폭 절감 목적의 강 압축)
-        JPEGCompress(quality_range=(30, 70), p=0.7),
+        # 저해상도 (v5 의 주범) — low_range 64-128→128-192, p 0.6→0.3
+        LowResSimulate(low_range=(128, 192), p=0.3),
+        # 블러 — radius 0.3-1.2→0.2-0.8, p 0.5→0.3
+        GaussianBlurRandom(radius_range=(0.2, 0.8), p=0.3),
+        # ColorJitter — v5 의 강화값에서 v3 / normal 수준으로 복귀
+        transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.05, hue=0.02),
+        # JPEG 압축 — quality 30-70→60-85 (덜 압축), p 0.7→0.4
+        JPEGCompress(quality_range=(60, 85), p=0.4),
         transforms.ToTensor(),
-        # Gaussian noise (저조도시 강함)
-        GaussianNoiseTensor(std_range=(0.0, 0.05), p=0.6),
+        # Gaussian noise — std 0-0.05→0-0.025, p 0.6→0.4
+        GaussianNoiseTensor(std_range=(0.0, 0.025), p=0.4),
         transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         transforms.RandomErasing(p=0.25, scale=(0.02, 0.10), ratio=(0.5, 2.0)),
     ])
