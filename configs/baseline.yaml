@@ -1,12 +1,24 @@
-# damda AI Baseline 학습 설정 (GPU 환경, v5)
+# damda AI Baseline 학습 설정 (GPU 환경, v5.1)
 #
-# v5 변경 사항 (v4 → v5):
-#   - augment_mode: normal → scanner  (ESP32-CAM 시연 환경 시뮬, 도메인 갭 mitigation)
-#   - sensor_inputs: [] → [moisture]  (FDC2112 수분 센서 입력, Phase 2 통합)
-#   - regression_targets: moisture 제거 (sensor 로 이동, data leakage 방지)
-#   - classification_loss: focal → ce (v4 의 일괄 focal γ=2 가 test set 에서 regression 확인됨)
-#   - focal_gamma: 0.0 (ce 사용 시 무시되지만 명시)
-# v5 가설 / scope / 평가 기준은 PROGRESS.md §6 참고
+# v5.1 변경 사항 (v5 → v5.1):
+#   - dataset.py 의 scanner aug 강도 약화 (~40% 수준)
+#     · LowResSimulate: low_range 64-128→128-192, p 0.6→0.3 (v5 주범)
+#     · GaussianBlur: radius 0.3-1.2→0.2-0.8, p 0.5→0.3
+#     · ColorJitter: 강화 → v3/normal 수준 복귀
+#     · JPEGCompress: quality 30-70→60-85, p 0.7→0.4
+#     · GaussianNoise: std 0-0.05→0-0.025, p 0.6→0.4
+#   - 그 외 yaml 항목 v5 와 동일 (augment_mode/sensor_inputs/classification_loss 등)
+#
+# v5 결과 (참고): composite 0.5513 (v3 0.6461 대비 -0.0948).
+# 디테일 의존 헤드 큰 폭 악화 (pore +38%, pigment +45%, wrinkle_grade -25%).
+# 거시 헤드는 영향 작음 → aug 강도 dial 만 약화하면 회복 가능 가설.
+# 상세는 PROGRESS.md §4 v5 / v5.1 절 참고
+#
+# 이전 변경 (v4 → v5):
+#   - augment_mode: normal → scanner (ESP32-CAM 도메인 갭 mitigation)
+#   - sensor_inputs: [] → [moisture] (FDC2112 매핑)
+#   - regression_targets: moisture 제거 (sensor 와 leakage 방지)
+#   - classification_loss: focal → ce (v4 의 focal 실패)
 
 seed: 42
 
