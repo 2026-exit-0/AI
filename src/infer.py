@@ -71,24 +71,36 @@ class DamdaInferenceModel:
         ckpt = torch.load(self.checkpoint_path, map_location=self.device)
         self.ckpt_epoch = int(ckpt.get("epoch", -1))
 
-        # config — 인자 우선, 없으면 ckpt 내부, 그래도 없으면 에러
+        # ---- Config 결정 (이중 source) ----
+        # yaml (인자) — 환경/데이터 경로/image_size 용도
+        # ckpt 의 저장된 config — model architecture 의 ground truth
+        # → 둘이 충돌 시 model architecture 는 무조건 ckpt 우선 (실제 학습된 구조와 일치해야 weight 로드 가능)
+        yaml_cfg: Optional[dict] = None
         if config_path is not None:
-            self.cfg = yaml.safe_load(open(config_path, "r", encoding="utf-8"))
-        elif "config" in ckpt:
-            self.cfg = ckpt["config"]
-        else:
+            yaml_cfg = yaml.safe_load(open(config_path, "r", encoding="utf-8"))
+        ckpt_cfg: Optional[dict] = ckpt.get("config")
+
+        if yaml_cfg is None and ckpt_cfg is None:
             raise ValueError("config_path 가 None 이고 ckpt 에도 config 없음")
 
-        model_cfg = self.cfg["model"]
-        self.regression_targets: List[str] = list(model_cfg["regression_targets"])
-        self.classification_heads: Dict[str, int] = dict(model_cfg["classification_heads"])
-        self.image_size: int = int(self.cfg["data"]["image_size"])
+        # 환경 설정 (image_size 등) 은 yaml > ckpt 순. yaml 없으면 ckpt.
+        self.cfg = yaml_cfg if yaml_cfg is not None else ckpt_cfg
 
-        # ---- Sensor 설정 (ckpt 우선) ----
+        # ---- Model architecture (ckpt 가 ground truth) ----
+        # v3 ckpt 를 v5 yaml 로 로드하면 회귀 헤드 수 / sensor_branch 차이로 state_dict mismatch 발생.
+        # 학습 시 실제 구조 = ckpt 에 저장된 config. yaml 과 다르더라도 ckpt 의 것 사용.
+        arch_cfg = ckpt_cfg if ckpt_cfg is not None else yaml_cfg
+        arch_model = arch_cfg["model"]
+        self.regression_targets: List[str] = list(arch_model["regression_targets"])
+        self.classification_heads: Dict[str, int] = dict(arch_model["classification_heads"])
+        # sensor_inputs 도 ckpt 우선 (이미 그러고 있었음 — 일관성 유지)
         self.sensor_inputs: List[str] = list(
-            ckpt.get("sensor_inputs", self.cfg["data"].get("sensor_inputs", []) or [])
+            ckpt.get("sensor_inputs", arch_cfg.get("data", {}).get("sensor_inputs", []) or [])
         )
         self.sensor_dim = len(self.sensor_inputs)
+
+        # ---- 그 외 환경 설정 (yaml 우선, 없으면 ckpt) ----
+        self.image_size: int = int(self.cfg["data"]["image_size"])
 
         # ---- 통계 (정규화/역정규화용) ----
         self.regression_stats: Dict[str, Dict[str, float]] = ckpt.get(
@@ -99,16 +111,17 @@ class DamdaInferenceModel:
         )
 
         # ---- 모델 구성 + 가중치 로드 ----
+        # backbone / region_emb_dim / dropout / sensor_emb_dim 도 ckpt arch_cfg 우선 (mismatch 방지)
         self.model = DamdaSkinModel(
-            backbone=model_cfg["backbone"],
+            backbone=arch_model["backbone"],
             pretrained=False,
-            num_regions=model_cfg["num_regions"],
-            region_emb_dim=model_cfg["region_emb_dim"],
+            num_regions=arch_model["num_regions"],
+            region_emb_dim=arch_model["region_emb_dim"],
             regression_targets=self.regression_targets,
             classification_heads=self.classification_heads,
-            dropout=model_cfg.get("dropout", 0.2),
+            dropout=arch_model.get("dropout", 0.2),
             sensor_dim=self.sensor_dim,
-            sensor_emb_dim=model_cfg.get("sensor_emb_dim", 32),
+            sensor_emb_dim=arch_model.get("sensor_emb_dim", 32),
         ).to(self.device)
         self.model.load_state_dict(ckpt["model"])
         self.model.eval()

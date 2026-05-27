@@ -454,29 +454,36 @@ def main() -> None:
     logger.info(f"manifest={len(df)}행 → split={args.split} → {len(target_df)}샘플")
 
     # ---- 모델 구성 ----
-    model_cfg = cfg["model"]
-    regression_targets = model_cfg["regression_targets"]
-    classification_heads = model_cfg["classification_heads"]
-
-    # ckpt 먼저 열어서 sensor_dim 결정 (v5+ 의 sensor 학습된 모델 호환)
+    # ckpt 의 저장된 config 가 model architecture 의 ground truth (학습 시 실제 사용된 것).
+    # yaml 과 다르더라도 ckpt 우선 — 그렇지 않으면 state_dict mismatch 로 로드 실패.
+    # (예: v3 ckpt 를 v5 yaml 로 평가하면 회귀 헤드 수 / sensor_branch 차이로 mismatch)
     ckpt = torch.load(args.checkpoint, map_location=device)
+    ckpt_cfg = ckpt.get("config")
+    arch_cfg = ckpt_cfg if ckpt_cfg is not None else cfg
+    arch_model = arch_cfg["model"]
+
+    regression_targets = list(arch_model["regression_targets"])
+    classification_heads = dict(arch_model["classification_heads"])
+
     ckpt_sensor_inputs = ckpt.get("sensor_inputs", []) or []
-    # cfg 의 sensor_inputs 보다 ckpt 의 것이 우선 (학습 시 실제 사용된 sensor 가 ground truth)
     sensor_inputs = ckpt_sensor_inputs if ckpt_sensor_inputs \
-                    else (cfg["data"].get("sensor_inputs", []) or [])
+                    else (arch_cfg.get("data", {}).get("sensor_inputs", []) or [])
     sensor_dim = len(sensor_inputs)
 
     model = DamdaSkinModel(
-        backbone=model_cfg["backbone"],
+        backbone=arch_model["backbone"],
         pretrained=False,  # 어차피 ckpt 로 덮어쓸 거라 ImageNet 다운로드 불필요
-        num_regions=model_cfg["num_regions"],
-        region_emb_dim=model_cfg["region_emb_dim"],
+        num_regions=arch_model["num_regions"],
+        region_emb_dim=arch_model["region_emb_dim"],
         regression_targets=regression_targets,
         classification_heads=classification_heads,
-        dropout=model_cfg.get("dropout", 0.2),
+        dropout=arch_model.get("dropout", 0.2),
         sensor_dim=sensor_dim,
-        sensor_emb_dim=model_cfg.get("sensor_emb_dim", 32),
+        sensor_emb_dim=arch_model.get("sensor_emb_dim", 32),
     ).to(device)
+
+    # cfg 의 model_cfg 는 num_regions 등 per-region 슬라이스에서 참조 (ckpt 와 동일하므로 OK)
+    model_cfg = arch_model
 
     model.load_state_dict(ckpt["model"])
     ckpt_epoch = int(ckpt.get("epoch", -1))
