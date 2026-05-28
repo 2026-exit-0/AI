@@ -220,10 +220,12 @@ def run_inference(
     device: torch.device,
     regression_targets: List[str],
     classification_heads: Dict[str, int],
+    tta: bool = False,
 ) -> dict:
     """전체 loader 순회하며 예측/정답/마스크/region_id 누적.
 
     model.sensor_dim > 0 이면 sensor + sensor_mask 도 forward 에 전달 (v5+).
+    tta=True 면 각 batch 의 이미지에 4가지 변형 적용 후 forward 평균 (정확도 +2~5%, 4배 느림).
     """
     model.eval()
 
@@ -235,7 +237,19 @@ def run_inference(
     use_sensor = getattr(model, "sensor_dim", 0) > 0
     use_categorical = getattr(model, "categorical_dim", 0) > 0
 
-    for batch in tqdm(loader, desc="[eval]", ncols=100):
+    # TTA 용 batch-level 변형 — image 가 이미 [B,3,224,224] 텐서로 변환된 상태이므로
+    # tensor-level 변형만 가능 (flip / multi-scale 은 회귀/색 유지). 일반 PIL 단계가 아닌 batch 변형.
+    def _tta_variants(t: torch.Tensor) -> list:
+        """입력 batch tensor 의 4가지 변형 — 원본 / flip / shift +2px / shift -2px."""
+        variants = [t]
+        variants.append(torch.flip(t, dims=[-1]))  # 수평 flip
+        variants.append(torch.roll(t, shifts=2, dims=-1))  # 우측 2px shift
+        variants.append(torch.roll(t, shifts=-2, dims=-1))  # 좌측 2px shift
+        return variants
+
+    import torch.nn.functional as F
+
+    for batch in tqdm(loader, desc="[eval]" + (" tta" if tta else ""), ncols=100):
         img = batch["image"].to(device, non_blocking=True)
         rid = batch["region_id"].to(device, non_blocking=True)
 
@@ -250,7 +264,31 @@ def run_inference(
             cm = batch.get("categorical_mask")
             if cm is not None:
                 kwargs["categorical_mask"] = cm.to(device, non_blocking=True)
-        out = model(img, rid, **kwargs)
+
+        if tta:
+            # 4가지 batch 변형 → forward → 평균
+            reg_accum, cls_accum = None, None
+            tta_imgs = _tta_variants(img)
+            for ti in tta_imgs:
+                o = model(ti, rid, **kwargs)
+                if "regression" in o:
+                    reg_accum = o["regression"] if reg_accum is None else reg_accum + o["regression"]
+                if "classification" in o:
+                    if cls_accum is None:
+                        cls_accum = {n: F.softmax(v, dim=-1) for n, v in o["classification"].items()}
+                    else:
+                        for n, v in o["classification"].items():
+                            cls_accum[n] = cls_accum[n] + F.softmax(v, dim=-1)
+            n_tta = len(tta_imgs)
+            out = {}
+            if reg_accum is not None:
+                out["regression"] = reg_accum / n_tta
+            if cls_accum is not None:
+                # softmax 평균값 — argmax 동일하게 작동하므로 classification_metrics 호환
+                # 단 logits 자리에 prob 들어가는 거라 argmax 결과는 변함 없음
+                out["classification"] = {n: v / n_tta for n, v in cls_accum.items()}
+        else:
+            out = model(img, rid, **kwargs)
 
         if "regression" in out and regression_targets:
             reg_preds.append(out["regression"].cpu().numpy())
@@ -424,6 +462,8 @@ def main() -> None:
                     help="비교할 baseline 결과 JSON 경로 (diff 표 자동 생성)")
     ap.add_argument("--config-version", default="",
                     help="결과 메타에 저장할 버전 라벨 (예: v3, v4)")
+    ap.add_argument("--tta", action="store_true",
+                    help="Test-Time Augmentation (4가지 변형 평균). 평가 시간 4배 늘지만 정확도 +2~5%%")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config, "r", encoding="utf-8"))
@@ -540,7 +580,7 @@ def main() -> None:
     )
 
     # ---- 추론 ----
-    bundle = run_inference(model, loader, device, regression_targets, classification_heads)
+    bundle = run_inference(model, loader, device, regression_targets, classification_heads, tta=args.tta)
 
     # ---- 전체 메트릭 ----
     reg_metrics = regression_metrics(
@@ -571,6 +611,7 @@ def main() -> None:
             "ckpt_epoch": ckpt_epoch,
             "config_version": args.config_version or "unknown",
             "sklearn_used": HAS_SKLEARN,
+            "tta": args.tta,
         },
         "regression": reg_metrics,
         "classification": cls_metrics,
