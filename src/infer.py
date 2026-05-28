@@ -49,6 +49,40 @@ from .utils import ID_TO_REGION, REGION_TO_ID, get_device
 
 
 # ============================================================
+# Categorical 입력 string → int 매핑 (시연용 placeholder)
+# ============================================================
+# 시연 시 사용자 questionnaire 가 한국어 string 으로 결과 반환.
+# 모델 학습은 manifest 의 정수값으로 했으므로 변환 필요.
+# ⚠ 정확한 매핑은 AI-Hub 028 데이터셋 문서 확인 후 보정 권장 (현재는 placeholder)
+SKIN_TYPE_TO_INT = {
+    "건성": 0, "지성": 1, "복합성": 2, "민감성": 3, "중성": 4,
+}
+SENSITIVE_TO_INT = {
+    "yes": 1, "no": 0, "있음": 1, "없음": 0, True: 1, False: 0,
+}
+
+
+def _resolve_categorical_value(col: str, v, num_classes: int):
+    """string 또는 정수를 모델용 정수 인덱스로 변환. 알 수 없으면 None."""
+    if isinstance(v, int):
+        return v if 0 <= v < num_classes else None
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, str):
+        v_s = v.strip()
+        if col == "skin_type" and v_s in SKIN_TYPE_TO_INT:
+            return SKIN_TYPE_TO_INT[v_s]
+        if col == "sensitive" and v_s in SENSITIVE_TO_INT:
+            return SENSITIVE_TO_INT[v_s]
+        # 숫자 문자열도 허용
+        try:
+            return int(v_s)
+        except ValueError:
+            return None
+    return None
+
+
+# ============================================================
 # Inference 클래스
 # ============================================================
 
@@ -99,6 +133,12 @@ class DamdaInferenceModel:
         )
         self.sensor_dim = len(self.sensor_inputs)
 
+        # v5.5+ categorical_inputs (사용자 자가입력) — ckpt 우선
+        self.categorical_inputs: Dict[str, int] = dict(
+            ckpt.get("categorical_inputs", arch_cfg.get("data", {}).get("categorical_inputs", {}) or {})
+        )
+        self.categorical_dim = sum(self.categorical_inputs.values())
+
         # ---- 그 외 환경 설정 (yaml 우선, 없으면 ckpt) ----
         self.image_size: int = int(self.cfg["data"]["image_size"])
 
@@ -111,7 +151,7 @@ class DamdaInferenceModel:
         )
 
         # ---- 모델 구성 + 가중치 로드 ----
-        # backbone / region_emb_dim / dropout / sensor_emb_dim 도 ckpt arch_cfg 우선 (mismatch 방지)
+        # backbone / region_emb_dim / dropout / sensor/categorical 모두 ckpt arch_cfg 우선
         self.model = DamdaSkinModel(
             backbone=arch_model["backbone"],
             pretrained=False,
@@ -122,6 +162,8 @@ class DamdaInferenceModel:
             dropout=arch_model.get("dropout", 0.2),
             sensor_dim=self.sensor_dim,
             sensor_emb_dim=arch_model.get("sensor_emb_dim", 32),
+            categorical_dim=self.categorical_dim,
+            categorical_emb_dim=arch_model.get("categorical_emb_dim", 32),
         ).to(self.device)
         self.model.load_state_dict(ckpt["model"])
         self.model.eval()
@@ -139,6 +181,7 @@ class DamdaInferenceModel:
         image_path: Union[str, Path, Image.Image],
         region: Union[str, int],
         sensor: Optional[Dict[str, float]] = None,
+        categorical: Optional[Dict[str, Union[int, str]]] = None,
         bbox: Optional[Tuple[int, int, int, int]] = None,
         return_probs: bool = False,
     ) -> dict:
@@ -202,14 +245,36 @@ class DamdaInferenceModel:
             sensor_tensor = torch.tensor([values], dtype=torch.float32, device=self.device)
             sensor_mask_tensor = torch.tensor([mask], dtype=torch.float32, device=self.device)
 
+        # ---- Categorical 텐서 준비 (v5.5+) ----
+        # categorical={"skin_type": 0 or "건성", "sensitive": 1} 같은 dict 받아 one-hot 으로 변환
+        categorical_tensor: Optional[torch.Tensor] = None
+        categorical_mask_tensor: Optional[torch.Tensor] = None
+        if self.categorical_dim > 0:
+            one_hots: List[float] = []
+            any_valid = False
+            cat_input = categorical or {}
+            for col, num_cls in self.categorical_inputs.items():
+                vec = [0.0] * num_cls
+                v = cat_input.get(col)
+                if v is not None:
+                    idx = _resolve_categorical_value(col, v, num_cls)
+                    if idx is not None and 0 <= idx < num_cls:
+                        vec[idx] = 1.0
+                        any_valid = True
+                one_hots.extend(vec)
+            categorical_tensor = torch.tensor([one_hots], dtype=torch.float32, device=self.device)
+            categorical_mask_tensor = torch.tensor([1.0 if any_valid else 0.0],
+                                                   dtype=torch.float32, device=self.device)
+
         # ---- Forward ----
+        kwargs = {}
         if self.sensor_dim > 0:
-            out = self.model(
-                img_tensor, rid_tensor,
-                sensor=sensor_tensor, sensor_mask=sensor_mask_tensor,
-            )
-        else:
-            out = self.model(img_tensor, rid_tensor)
+            kwargs["sensor"] = sensor_tensor
+            kwargs["sensor_mask"] = sensor_mask_tensor
+        if self.categorical_dim > 0:
+            kwargs["categorical"] = categorical_tensor
+            kwargs["categorical_mask"] = categorical_mask_tensor
+        out = self.model(img_tensor, rid_tensor, **kwargs)
 
         # ---- 후처리: 회귀 denormalize ----
         regression_out: Dict[str, float] = {}
@@ -242,6 +307,8 @@ class DamdaInferenceModel:
                 "checkpoint": str(self.checkpoint_path),
                 "sensor_dim": self.sensor_dim,
                 "sensor_inputs_used": self.sensor_inputs,
+                "categorical_dim": self.categorical_dim,
+                "categorical_inputs_used": list(self.categorical_inputs.keys()),
             },
         }
         if return_probs:

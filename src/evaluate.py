@@ -233,19 +233,24 @@ def run_inference(
     region_ids = []
 
     use_sensor = getattr(model, "sensor_dim", 0) > 0
+    use_categorical = getattr(model, "categorical_dim", 0) > 0
 
     for batch in tqdm(loader, desc="[eval]", ncols=100):
         img = batch["image"].to(device, non_blocking=True)
         rid = batch["region_id"].to(device, non_blocking=True)
 
+        kwargs = {}
         if use_sensor:
-            sens = batch["sensor"].to(device, non_blocking=True)
-            sens_mask = batch.get("sensor_mask")
-            if sens_mask is not None:
-                sens_mask = sens_mask.to(device, non_blocking=True)
-            out = model(img, rid, sensor=sens, sensor_mask=sens_mask)
-        else:
-            out = model(img, rid)
+            kwargs["sensor"] = batch["sensor"].to(device, non_blocking=True)
+            sm = batch.get("sensor_mask")
+            if sm is not None:
+                kwargs["sensor_mask"] = sm.to(device, non_blocking=True)
+        if use_categorical:
+            kwargs["categorical"] = batch["categorical"].to(device, non_blocking=True)
+            cm = batch.get("categorical_mask")
+            if cm is not None:
+                kwargs["categorical_mask"] = cm.to(device, non_blocking=True)
+        out = model(img, rid, **kwargs)
 
         if "regression" in out and regression_targets:
             reg_preds.append(out["regression"].cpu().numpy())
@@ -470,6 +475,12 @@ def main() -> None:
                     else (arch_cfg.get("data", {}).get("sensor_inputs", []) or [])
     sensor_dim = len(sensor_inputs)
 
+    # v5.5+ categorical_inputs 도 ckpt 우선
+    ckpt_categorical = ckpt.get("categorical_inputs", {}) or {}
+    categorical_inputs: Dict[str, int] = dict(ckpt_categorical) if ckpt_categorical \
+        else dict(arch_cfg.get("data", {}).get("categorical_inputs", {}) or {})
+    categorical_dim = sum(categorical_inputs.values())
+
     model = DamdaSkinModel(
         backbone=arch_model["backbone"],
         pretrained=False,  # 어차피 ckpt 로 덮어쓸 거라 ImageNet 다운로드 불필요
@@ -480,6 +491,8 @@ def main() -> None:
         dropout=arch_model.get("dropout", 0.2),
         sensor_dim=sensor_dim,
         sensor_emb_dim=arch_model.get("sensor_emb_dim", 32),
+        categorical_dim=categorical_dim,
+        categorical_emb_dim=arch_model.get("categorical_emb_dim", 32),
     ).to(device)
 
     # cfg 의 model_cfg 는 num_regions 등 per-region 슬라이스에서 참조 (ckpt 와 동일하므로 OK)
@@ -515,6 +528,7 @@ def main() -> None:
         regression_stats=regression_stats,
         sensor_inputs=sensor_inputs,
         sensor_stats=sensor_stats,
+        categorical_inputs=categorical_inputs,
     )
     loader = DataLoader(
         ds,

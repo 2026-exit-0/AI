@@ -28,6 +28,10 @@ class DamdaSkinModel(nn.Module):
         # Phase 2 확장용
         sensor_dim: int = 0,
         sensor_emb_dim: int = 32,
+        # v5.5: categorical inputs (사용자 입력 — skin_type / sensitive 등)
+        # 각 입력은 one-hot 으로 인코딩되어 concat → categorical_branch 통과 → trunk 에 fusion
+        categorical_dim: int = 0,   # = sum(num_classes for each categorical input)
+        categorical_emb_dim: int = 32,
     ):
         super().__init__()
 
@@ -64,6 +68,18 @@ class DamdaSkinModel(nn.Module):
             self.sensor_branch = None
             fused_dim = self.feature_dim + region_emb_dim
 
+        # ----- (v5.5) Categorical branch (사용자 자가 입력) -----
+        self.categorical_dim = categorical_dim
+        if categorical_dim > 0:
+            self.categorical_branch = nn.Sequential(
+                nn.Linear(categorical_dim, categorical_emb_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(categorical_emb_dim, categorical_emb_dim),
+            )
+            fused_dim += categorical_emb_dim
+        else:
+            self.categorical_branch = None
+
         # ----- Shared trunk -----
         self.trunk = nn.Sequential(
             nn.Linear(fused_dim, 512),
@@ -89,14 +105,18 @@ class DamdaSkinModel(nn.Module):
         region_id: torch.Tensor,
         sensor: Optional[torch.Tensor] = None,
         sensor_mask: Optional[torch.Tensor] = None,
+        categorical: Optional[torch.Tensor] = None,
+        categorical_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """순전파.
 
         Args:
             sensor: (B, sensor_dim). sensor_dim > 0 인 경우 필수.
             sensor_mask: (B,) 또는 (B, sensor_dim) — 1=valid, 0=결측.
-                None 이면 모두 valid 로 간주. 결측 sensor 의 sens_feat 은
-                0으로 마스킹되어 fused trunk 가 결측 행에서는 sensor 영향 받지 않음.
+            categorical: (B, categorical_dim). categorical_dim > 0 인 경우 필수.
+                각 categorical input 의 one-hot 을 concat 한 벡터.
+            categorical_mask: (B,) — 1=valid (사용자가 입력함), 0=결측 (UI 에서 안 입력).
+                None 이면 모두 valid 로 간주.
         """
         img_feat = self.backbone(image)              # (B, 2048)
         reg_emb = self.region_embedding(region_id)   # (B, 16)
@@ -108,16 +128,23 @@ class DamdaSkinModel(nn.Module):
                 raise ValueError("sensor_dim > 0 이지만 sensor 입력이 None")
             sens_feat = self.sensor_branch(sensor)   # (B, sensor_emb_dim)
             if sensor_mask is not None:
-                # mask 모양 정규화: (B,) → (B, 1) 로 broadcast
                 if sensor_mask.dim() == 1:
                     m = sensor_mask.unsqueeze(1)
                 elif sensor_mask.dim() == 2 and sensor_mask.shape[1] != 1:
-                    # (B, sensor_dim) 마스크면 행 단위 AND 로 축소 (모두 valid 일 때만 1)
                     m = (sensor_mask.sum(dim=1, keepdim=True) > 0).float()
                 else:
                     m = sensor_mask
                 sens_feat = sens_feat * m
             feats.append(sens_feat)
+
+        if self.categorical_branch is not None:
+            if categorical is None:
+                raise ValueError("categorical_dim > 0 이지만 categorical 입력이 None")
+            cat_feat = self.categorical_branch(categorical)  # (B, categorical_emb_dim)
+            if categorical_mask is not None:
+                m = categorical_mask.unsqueeze(1) if categorical_mask.dim() == 1 else categorical_mask
+                cat_feat = cat_feat * m
+            feats.append(cat_feat)
 
         fused = torch.cat(feats, dim=1)
         trunk_out = self.trunk(fused)                # (B, 512)

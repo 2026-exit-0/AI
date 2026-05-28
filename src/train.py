@@ -66,14 +66,15 @@ def make_scheduler(optimizer, cfg: dict, num_epochs: int):
 # ---------------- Loops ----------------
 
 def _forward_with_sensor(model, batch):
-    """sensor_dim>0 일 때 sensor + sensor_mask 도 전달. v5+ Phase 2 통합."""
+    """sensor / categorical 입력이 있을 때 함께 전달. v5+ / v5.5+ 통합."""
+    kwargs = {}
     if getattr(model, "sensor_dim", 0) > 0 and "sensor" in batch:
-        return model(
-            batch["image"], batch["region_id"],
-            sensor=batch["sensor"],
-            sensor_mask=batch.get("sensor_mask"),
-        )
-    return model(batch["image"], batch["region_id"])
+        kwargs["sensor"] = batch["sensor"]
+        kwargs["sensor_mask"] = batch.get("sensor_mask")
+    if getattr(model, "categorical_dim", 0) > 0 and "categorical" in batch:
+        kwargs["categorical"] = batch["categorical"]
+        kwargs["categorical_mask"] = batch.get("categorical_mask")
+    return model(batch["image"], batch["region_id"], **kwargs)
 
 
 def train_one_epoch(model, loader, optimizer, scaler, device, cfg, writer, global_step, epoch,
@@ -250,18 +251,17 @@ def main():
     augment_mode = cfg["data"].get("augment_mode", "normal")
     logger.info(f"augment_mode = {augment_mode}")
 
-    # sensor 입력 (v5+, Phase 2). 빈 리스트면 sensor 비활성 → model.sensor_dim=0
+    # sensor 입력 (v5+). 빈 리스트면 sensor 비활성 → model.sensor_dim=0
     sensor_inputs = cfg["data"].get("sensor_inputs", []) or []
     sensor_dim = len(sensor_inputs)
     sensor_stats: Dict[str, Dict[str, float]] = {}
     if sensor_dim > 0:
         # 안전 체크: sensor_inputs 와 regression_targets 가 겹치면 data leakage
-        # (모델이 sensor 입력값을 회귀 출력으로 그대로 echo 학습 → 추론 시 sensor 없으면 망함)
         overlap = set(sensor_inputs) & set(regression_targets)
         if overlap:
             raise ValueError(
                 f"data leakage 가능성: 다음 컬럼이 sensor_inputs 와 regression_targets 양쪽에 있음: "
-                f"{sorted(overlap)}. 한쪽에서 제거할 것 (시연용이면 regression_targets 에서 제거 권장)."
+                f"{sorted(overlap)}. 한쪽에서 제거할 것."
             )
         from .dataset import compute_sensor_stats
         sensor_stats = compute_sensor_stats(train_df, sensor_inputs)
@@ -271,18 +271,45 @@ def main():
     else:
         logger.info("sensor_inputs 비활성 (sensor_dim=0)")
 
+    # categorical 입력 (v5.5+). dict {col: num_classes}. 빈 dict 면 비활성.
+    categorical_inputs: Dict[str, int] = dict(cfg["data"].get("categorical_inputs", {}) or {})
+    categorical_dim = sum(categorical_inputs.values())
+    if categorical_inputs:
+        # 안전 체크: categorical 과 classification_heads 겹치면 자동 제거 (output 에서 빼기)
+        # — 학습 데이터 누설 방지 + 시연 시 자가진단 입력이 분류 출력으로 echo 되지 않도록
+        overlap_cls = set(categorical_inputs) & set(classification_heads)
+        if overlap_cls:
+            logger.info(
+                f"categorical_inputs 와 classification_heads 가 겹침 → 분류 출력에서 제거: "
+                f"{sorted(overlap_cls)}"
+            )
+            classification_heads = {k: v for k, v in classification_heads.items()
+                                    if k not in categorical_inputs}
+        # data leakage 추가 체크
+        overlap_sensor = set(categorical_inputs) & set(sensor_inputs)
+        if overlap_sensor:
+            raise ValueError(
+                f"data leakage: 다음 컬럼이 categorical_inputs 와 sensor_inputs 양쪽에 있음: "
+                f"{sorted(overlap_sensor)}."
+            )
+        logger.info(f"categorical_inputs = {categorical_inputs}  (categorical_dim={categorical_dim})")
+    else:
+        logger.info("categorical_inputs 비활성 (categorical_dim=0)")
+
     train_ds = DamdaSkinDataset(train_df, regression_targets, classification_heads,
                                 image_size=cfg["data"]["image_size"], train=True,
                                 regression_stats=regression_stats,
                                 augment_mode=augment_mode,
                                 sensor_inputs=sensor_inputs,
-                                sensor_stats=sensor_stats)
+                                sensor_stats=sensor_stats,
+                                categorical_inputs=categorical_inputs)
     val_ds   = DamdaSkinDataset(val_df,   regression_targets, classification_heads,
                                 image_size=cfg["data"]["image_size"], train=False,
                                 regression_stats=regression_stats,
                                 augment_mode=augment_mode,
                                 sensor_inputs=sensor_inputs,
-                                sensor_stats=sensor_stats)
+                                sensor_stats=sensor_stats,
+                                categorical_inputs=categorical_inputs)
 
     pin = device.type == "cuda"
     train_loader = DataLoader(train_ds, batch_size=cfg["training"]["batch_size"],
@@ -293,7 +320,7 @@ def main():
                               collate_fn=collate_fn, pin_memory=pin)
 
     # ----- Model -----
-    # sensor_dim 은 위에서 cfg["data"]["sensor_inputs"] 기반으로 계산됨. Phase 1 (v1~v4) = 0.
+    # sensor_dim / categorical_dim 은 위에서 cfg["data"] 기반으로 계산됨.
     model = DamdaSkinModel(
         backbone=model_cfg["backbone"],
         pretrained=model_cfg["pretrained"],
@@ -304,6 +331,8 @@ def main():
         dropout=model_cfg.get("dropout", 0.2),
         sensor_dim=sensor_dim,
         sensor_emb_dim=model_cfg.get("sensor_emb_dim", 32),
+        categorical_dim=categorical_dim,
+        categorical_emb_dim=model_cfg.get("categorical_emb_dim", 32),
     ).to(device)
     logger.info(f"model params: {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
 
@@ -377,6 +406,7 @@ def main():
                 "regression_stats": regression_stats,
                 "sensor_stats": sensor_stats,
                 "sensor_inputs": sensor_inputs,
+                "categorical_inputs": categorical_inputs,
             }, ckpt_path)
             logger.info(f"체크포인트 저장: {ckpt_path}")
 
