@@ -266,6 +266,9 @@ class DamdaSkinDataset(Dataset):
         augment_mode: str = "normal",
         sensor_inputs: List[str] = None,
         sensor_stats: Dict[str, Dict[str, float]] = None,
+        # v5.5: categorical inputs (사용자 자가입력 — skin_type / sensitive 등)
+        # dict: {col_name: num_classes}. one-hot 인코딩되어 단일 벡터로 concat.
+        categorical_inputs: Dict[str, int] = None,
     ):
         self.df = manifest_df.reset_index(drop=True)
         self.regression_targets = regression_targets
@@ -276,11 +279,15 @@ class DamdaSkinDataset(Dataset):
         self.regression_stats = regression_stats or {
             col: {"mean": 0.0, "std": 1.0} for col in regression_targets
         }
-        # Sensor 입력 (v5+, Phase 2). 빈 리스트면 sensor 비활성 (model.sensor_dim=0 필요)
+        # Sensor 입력 (v5+). 빈 리스트면 sensor 비활성 (model.sensor_dim=0 필요)
         self.sensor_inputs = list(sensor_inputs or [])
         self.sensor_stats = sensor_stats or {
             col: {"mean": 0.0, "std": 1.0} for col in self.sensor_inputs
         }
+        # Categorical 입력 (v5.5+). 빈 dict 면 categorical 비활성
+        self.categorical_inputs: Dict[str, int] = dict(categorical_inputs or {})
+        # 총 one-hot 차원 (model.categorical_dim 과 일치해야 함)
+        self.categorical_dim = sum(self.categorical_inputs.values())
 
     def __len__(self) -> int:
         return len(self.df)
@@ -343,7 +350,7 @@ class DamdaSkinDataset(Dataset):
                 cls_idx = max(0, min(num_cls - 1, cls_idx))
                 classification[col] = torch.tensor(cls_idx, dtype=torch.long)
 
-        # ----- 센서 입력 (v5+, Phase 2) — 정규화 + mask -----
+        # ----- 센서 입력 (v5+) — 정규화 + mask -----
         if self.sensor_inputs:
             s_values, s_mask = [], []
             for col in self.sensor_inputs:
@@ -358,9 +365,29 @@ class DamdaSkinDataset(Dataset):
             sensor = torch.tensor(s_values, dtype=torch.float32)
             sensor_mask = torch.tensor(s_mask, dtype=torch.float32)
         else:
-            # sensor 비활성 — placeholder. collate 에서 무시되거나 model.sensor_dim=0 일 때만 통과
             sensor = torch.zeros(0, dtype=torch.float32)
             sensor_mask = torch.zeros(0, dtype=torch.float32)
+
+        # ----- Categorical 입력 (v5.5+) — one-hot + mask -----
+        # 각 categorical col 을 one-hot 으로 변환 후 concat. 결측이면 0-벡터 + mask=0.
+        # 학습 시엔 manifest 의 정수값 사용. 추론 시엔 사용자 자가입력 (UI/questionnaire).
+        if self.categorical_inputs:
+            one_hots: List[float] = []
+            any_valid = False
+            for col, num_cls in self.categorical_inputs.items():
+                v = row.get(col)
+                vec = [0.0] * num_cls
+                if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                    idx = int(v)
+                    if 0 <= idx < num_cls:
+                        vec[idx] = 1.0
+                        any_valid = True
+                one_hots.extend(vec)
+            categorical = torch.tensor(one_hots, dtype=torch.float32)
+            categorical_mask = torch.tensor(1.0 if any_valid else 0.0, dtype=torch.float32)
+        else:
+            categorical = torch.zeros(0, dtype=torch.float32)
+            categorical_mask = torch.zeros((), dtype=torch.float32)
 
         return {
             "image": img_tensor,
@@ -370,6 +397,8 @@ class DamdaSkinDataset(Dataset):
             "classification": classification,
             "sensor": sensor,
             "sensor_mask": sensor_mask,
+            "categorical": categorical,
+            "categorical_mask": categorical_mask,
             "meta": {
                 "subject_id": str(row.get("subject_id", "")),
                 "region": str(row.get("region", "")),
@@ -417,7 +446,7 @@ def split_manifest(
 
 
 def collate_fn(batch: List[dict]) -> dict:
-    """배치 collate — classification 사전을 텐서로 묶음. sensor 도 함께 묶음 (v5+)."""
+    """배치 collate — classification 사전을 텐서로 묶음. sensor / categorical 도 함께 (v5.5+)."""
     images = torch.stack([b["image"] for b in batch])
     region_ids = torch.stack([b["region_id"] for b in batch])
     regression = torch.stack([b["regression"] for b in batch])
@@ -426,9 +455,11 @@ def collate_fn(batch: List[dict]) -> dict:
     cls_keys = batch[0]["classification"].keys()
     classification = {k: torch.stack([b["classification"][k] for b in batch]) for k in cls_keys}
 
-    # sensor — shape (S,) per sample. S=0 인 경우엔 빈 텐서.
     sensor = torch.stack([b["sensor"] for b in batch])             # (B, S)
     sensor_mask = torch.stack([b["sensor_mask"] for b in batch])   # (B, S)
+
+    categorical = torch.stack([b["categorical"] for b in batch])             # (B, C)
+    categorical_mask = torch.stack([b["categorical_mask"] for b in batch])   # (B,)
 
     return {
         "image": images,
@@ -438,4 +469,6 @@ def collate_fn(batch: List[dict]) -> dict:
         "classification": classification,
         "sensor": sensor,
         "sensor_mask": sensor_mask,
+        "categorical": categorical,
+        "categorical_mask": categorical_mask,
     }

@@ -1,4 +1,14 @@
-# damda AI Baseline 학습 설정 (GPU 환경, v5.1)
+# damda AI Baseline 학습 설정 (GPU 환경, v5.5)
+#
+# v5.5 변경 사항 (v5.1 → v5.5):
+#   - data.categorical_inputs 신규: {skin_type: 6, sensitive: 2}
+#     → 사용자 자가입력을 모델 INPUT 으로 활용. 학습 시엔 manifest 의 정수값.
+#   - skin_type, sensitive 는 classification_heads 에서 자동 제거 (train.py)
+#     → output 에서 빠지고 input 으로 이동 (data leakage 방지, sensor 패턴과 동일)
+#   - 그 외 v5.1 와 동일 (scanner aug 약화 / sensor moisture / CE)
+#
+# 가설: 사용자 입력이 모델에 들어가면 약한 헤드 (dryness/sagging/wrinkle_grade 등) 가
+# 개인 prior 받아 추정 정확도 향상. v5.1 의 성공 위에 추가 boost 시도.
 #
 # v5.1 변경 사항 (v5 → v5.1):
 #   - dataset.py 의 scanner aug 강도 약화 (~40% 수준)
@@ -46,6 +56,14 @@ data:
   # ⚠ sensor_inputs 의 컬럼명은 regression_targets 와 절대 겹치면 안 됨 (data leakage)
   sensor_inputs:
     - moisture
+
+  # v5.5+: 사용자 자가입력을 모델 input 으로 활용 (one-hot 인코딩).
+  # dict {col_name: num_classes}. 학습 시엔 manifest 의 정수값. 추론 시엔 UI questionnaire.
+  # ⚠ 이 컬럼들은 classification_heads 와 겹치면 train.py 가 자동으로 분류 output 에서 제거.
+  # 매핑 (한국어 → 정수) 은 infer.py 의 SKIN_TYPE_TO_INT / SENSITIVE_TO_INT 참고 (placeholder).
+  categorical_inputs:
+    skin_type: 6
+    sensitive: 2
 
 # ===== Model =====
 model:
