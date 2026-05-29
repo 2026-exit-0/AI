@@ -221,6 +221,8 @@ def run_inference(
     regression_targets: List[str],
     classification_heads: Dict[str, int],
     tta: bool = False,
+    sensor_inputs: Optional[List[str]] = None,
+    categorical_inputs: Optional[Dict[str, int]] = None,
 ) -> dict:
     """전체 loader 순회하며 예측/정답/마스크/region_id 누적.
 
@@ -236,6 +238,9 @@ def run_inference(
         models = [models]
     for m in models:
         m.eval()
+
+    sensor_inputs = sensor_inputs or []
+    categorical_inputs = categorical_inputs or {}
 
     reg_preds, reg_targets, reg_masks = [], [], []
     cls_logits = {name: [] for name in classification_heads}
@@ -288,15 +293,31 @@ def run_inference(
         cls_accum: Dict[str, torch.Tensor] = {}
         n_forwards = 0
 
+        # union categorical 의 col 별 offset 미리 계산 (한번만)
+        if "categorical" in kwargs:
+            cat_offsets: Dict[str, tuple] = {}
+            offset = 0
+            for col_name, n_cls in categorical_inputs.items():
+                cat_offsets[col_name] = (offset, offset + n_cls)
+                offset += n_cls
+
         for m in models:
-            # 각 모델이 받는 kwargs 는 자기 sensor_dim/categorical_dim 에 맞게 필터
+            # 각 모델이 받는 kwargs — 자기 sensor_inputs_list / categorical_inputs_dict 에 맞춰 slice
             m_kwargs = {}
-            if getattr(m, "sensor_dim", 0) > 0 and "sensor" in kwargs:
-                m_kwargs["sensor"] = kwargs["sensor"]
+            m_sensor_cols = getattr(m, "_sensor_inputs_list", [])
+            if m_sensor_cols and getattr(m, "sensor_dim", 0) > 0 and "sensor" in kwargs:
+                idx = [sensor_inputs.index(c) for c in m_sensor_cols]
+                m_kwargs["sensor"] = kwargs["sensor"][:, idx]
                 if "sensor_mask" in kwargs:
-                    m_kwargs["sensor_mask"] = kwargs["sensor_mask"]
-            if getattr(m, "categorical_dim", 0) > 0 and "categorical" in kwargs:
-                m_kwargs["categorical"] = kwargs["categorical"]
+                    m_kwargs["sensor_mask"] = kwargs["sensor_mask"][:, idx]
+
+            m_cat_dict = getattr(m, "_categorical_inputs_dict", {})
+            if m_cat_dict and getattr(m, "categorical_dim", 0) > 0 and "categorical" in kwargs:
+                pieces = []
+                for col_name, _ in m_cat_dict.items():
+                    s, e = cat_offsets[col_name]
+                    pieces.append(kwargs["categorical"][:, s:e])
+                m_kwargs["categorical"] = torch.cat(pieces, dim=1)
                 if "categorical_mask" in kwargs:
                     m_kwargs["categorical_mask"] = kwargs["categorical_mask"]
 
@@ -578,16 +599,15 @@ def main() -> None:
 
     def _build_model_from_ckpt(c_ckpt: dict) -> DamdaSkinModel:
         """각 ckpt 의 config 보고 그에 맞는 model 만든 후 weight 로드.
-        ensemble 시 ckpt 들이 다른 architecture 가져도 각자 정확히 복원."""
+        sensor/categorical input 목록은 모델에 부착 (ensemble slicing 용)."""
         c_cfg = c_ckpt.get("config") or arch_cfg
         c_model = c_cfg["model"]
         c_reg = list(c_model["regression_targets"])
         c_cls = dict(c_model["classification_heads"])
         c_sensor = list(c_ckpt.get("sensor_inputs", []) or [])
         c_cat = dict(c_ckpt.get("categorical_inputs", {}) or {})
-        # categorical ∩ classification_heads 자동 제거
         for col in c_cat:
-            c_cls.pop(col, None)
+            c_cls.pop(col, None)  # categorical ∩ classification_heads 자동 제거
         m = DamdaSkinModel(
             backbone=c_model["backbone"],
             pretrained=False,
@@ -603,11 +623,38 @@ def main() -> None:
         ).to(device)
         m.load_state_dict(c_ckpt["model"])
         m.eval()
+        # ensemble slicing 용 메타 부착
+        m._sensor_inputs_list = c_sensor
+        m._categorical_inputs_dict = c_cat
         return m
 
     models: List[DamdaSkinModel] = [_build_model_from_ckpt(c) for c in ckpts]
-    model = models[0]  # 기본 참조 (per-region 슬라이스 등에서)
+    model = models[0]  # 기본 참조
     model_cfg = arch_model
+
+    # ensemble: sensor/categorical 의 union 으로 dataset 구성 → 각 모델은 자기 몫만 slice
+    if is_ensemble:
+        union_sensor_inputs: List[str] = []
+        union_sensor_stats: Dict[str, Dict[str, float]] = {}
+        union_categorical_inputs: Dict[str, int] = {}
+        for c_ckpt in ckpts:
+            for col in (c_ckpt.get("sensor_inputs") or []):
+                if col not in union_sensor_inputs:
+                    union_sensor_inputs.append(col)
+            for col, s in (c_ckpt.get("sensor_stats") or {}).items():
+                if col not in union_sensor_stats:
+                    union_sensor_stats[col] = s
+            for col, n in (c_ckpt.get("categorical_inputs") or {}).items():
+                if col in union_categorical_inputs and union_categorical_inputs[col] != n:
+                    raise ValueError(f"앙상블 멤버 간 categorical '{col}' 의 num_classes 가 다름")
+                union_categorical_inputs[col] = n
+        # 덮어쓰기 — dataset 은 union 사용
+        sensor_inputs = union_sensor_inputs
+        sensor_stats = union_sensor_stats
+        categorical_inputs = union_categorical_inputs
+        sensor_dim = len(sensor_inputs)
+        categorical_dim = sum(categorical_inputs.values())
+        logger.info(f"ensemble union: sensor={union_sensor_inputs}, categorical={union_categorical_inputs}")
 
     ckpt_epoch = int(ckpt.get("epoch", -1))
     if is_ensemble:
@@ -654,7 +701,12 @@ def main() -> None:
     )
 
     # ---- 추론 ----
-    bundle = run_inference(models, loader, device, regression_targets, classification_heads, tta=args.tta)
+    bundle = run_inference(
+        models, loader, device, regression_targets, classification_heads,
+        tta=args.tta,
+        sensor_inputs=sensor_inputs,
+        categorical_inputs=categorical_inputs,
+    )
 
     # ---- 전체 메트릭 ----
     reg_metrics = regression_metrics(
