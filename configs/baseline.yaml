@@ -1,14 +1,19 @@
-# damda AI Baseline 학습 설정 (GPU 환경, v5.5)
+# damda AI Baseline 학습 설정 (GPU 환경, v5.5b)
+#
+# v5.5b 변경 사항 (v5.5 → v5.5b):
+#   - training.early_stop_patience: 8 → 15
+#   - 이유: v5.5 가 epoch 20 에서 early_stop (v5.1 은 ep48 까지 학습).
+#     새 categorical_branch 가 random init 이라 학습 수렴에 더 많은 epoch 필요.
+#     patience 늘려서 categorical_branch 안정화 + 강한 헤드 학습 부족 해소 시도.
+#   - 그 외 v5.5 와 동일 (categorical_inputs / scanner aug 약화 / sensor / CE)
+#
+# 검증: composite > 0.67 면 categorical 가설 확정 + v5.1 능가
+# 실패: 동일 결과면 categorical 신호 자체가 약함 (v6 / v6.5 로 방향 전환)
 #
 # v5.5 변경 사항 (v5.1 → v5.5):
 #   - data.categorical_inputs 신규: {skin_type: 6, sensitive: 2}
-#     → 사용자 자가입력을 모델 INPUT 으로 활용. 학습 시엔 manifest 의 정수값.
+#     → 사용자 자가입력을 모델 INPUT 으로 활용
 #   - skin_type, sensitive 는 classification_heads 에서 자동 제거 (train.py)
-#     → output 에서 빠지고 input 으로 이동 (data leakage 방지, sensor 패턴과 동일)
-#   - 그 외 v5.1 와 동일 (scanner aug 약화 / sensor moisture / CE)
-#
-# 가설: 사용자 입력이 모델에 들어가면 약한 헤드 (dryness/sagging/wrinkle_grade 등) 가
-# 개인 prior 받아 추정 정확도 향상. v5.1 의 성공 위에 추가 boost 시도.
 #
 # v5.1 변경 사항 (v5 → v5.1):
 #   - dataset.py 의 scanner aug 강도 약화 (~40% 수준)
@@ -121,7 +126,8 @@ training:
   focal_gamma: 0.0        # ce 사용 시 무시됨. 명시적으로 0
 
   # Early stopping — val/loss/total 이 N epoch 동안 개선 없으면 종료. 0=비활성
-  early_stop_patience: 8
+  # v5.5b: 8 → 15. categorical_branch 의 random init 학습 수렴 시간 확보.
+  early_stop_patience: 15
 
   amp: true               # CUDA에서 자동 활성화. MPS/CPU는 무시.
 
