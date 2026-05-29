@@ -321,19 +321,24 @@ def run_inference(
                 if "categorical_mask" in kwargs:
                     m_kwargs["categorical_mask"] = kwargs["categorical_mask"]
 
+            # 모델의 회귀 출력 순서 (m._regression_targets_list) 와 metric 의 regression_targets 매핑
+            # → 각 모델 출력에서 metric 헤드 순서대로 column slice
+            m_reg_list = getattr(m, "_regression_targets_list", regression_targets)
+            reg_slice_idx = [m_reg_list.index(t) for t in regression_targets if t in m_reg_list]
+            # 분류는 dict 라 name 으로 직접 lookup. metric 의 classification_heads 키만 골라 사용
+            m_cls_keys = list(getattr(m, "_classification_heads_dict", {}).keys()) or list(classification_heads.keys())
+
             for img_v in imgs_to_run:
                 o = m(img_v, rid, **m_kwargs)
                 n_forwards += 1
-                # 회귀 — 공통 헤드만 (다른 모델이 다른 reg head 가지면 처음에 들어온 것 기준)
-                if "regression" in o:
-                    # 모델 reg 와 메인 regression_targets 의 인덱스 매핑 필요 (아래서 정렬)
-                    # 단순화: 모든 모델이 같은 reg targets 가졌다고 가정 (이ensemble 의 일반 경우)
-                    reg_accum = o["regression"] if reg_accum is None else reg_accum + o["regression"]
-                # 분류 — softmax 평균. 헤드별로 accumulate.
+                if "regression" in o and reg_slice_idx:
+                    reg_sliced = o["regression"][:, reg_slice_idx]
+                    reg_accum = reg_sliced if reg_accum is None else reg_accum + reg_sliced
                 if "classification" in o:
-                    for n, logits in o["classification"].items():
-                        probs = F.softmax(logits, dim=-1)
-                        cls_accum[n] = probs if n not in cls_accum else cls_accum[n] + probs
+                    for n in classification_heads:
+                        if n in o["classification"]:
+                            probs = F.softmax(o["classification"][n], dim=-1)
+                            cls_accum[n] = probs if n not in cls_accum else cls_accum[n] + probs
 
         out = {}
         if reg_accum is not None and n_forwards > 0:
@@ -623,9 +628,11 @@ def main() -> None:
         ).to(device)
         m.load_state_dict(c_ckpt["model"])
         m.eval()
-        # ensemble slicing 용 메타 부착
+        # ensemble slicing 용 메타 부착 (sensor/categorical + reg/cls heads)
         m._sensor_inputs_list = c_sensor
         m._categorical_inputs_dict = c_cat
+        m._regression_targets_list = c_reg
+        m._classification_heads_dict = c_cls
         return m
 
     models: List[DamdaSkinModel] = [_build_model_from_ckpt(c) for c in ckpts]
@@ -633,6 +640,7 @@ def main() -> None:
     model_cfg = arch_model
 
     # ensemble: sensor/categorical 의 union 으로 dataset 구성 → 각 모델은 자기 몫만 slice
+    # 회귀/분류 헤드는 intersection (공통) 만 평균 → dataset/metric 도 intersection 으로 override
     if is_ensemble:
         union_sensor_inputs: List[str] = []
         union_sensor_stats: Dict[str, Dict[str, float]] = {}
@@ -648,13 +656,31 @@ def main() -> None:
                 if col in union_categorical_inputs and union_categorical_inputs[col] != n:
                     raise ValueError(f"앙상블 멤버 간 categorical '{col}' 의 num_classes 가 다름")
                 union_categorical_inputs[col] = n
-        # 덮어쓰기 — dataset 은 union 사용
         sensor_inputs = union_sensor_inputs
         sensor_stats = union_sensor_stats
         categorical_inputs = union_categorical_inputs
         sensor_dim = len(sensor_inputs)
         categorical_dim = sum(categorical_inputs.values())
+
+        # 회귀/분류 헤드 intersection — 다른 reg/cls 헤드 가진 ckpt 도 공통만 평균
+        reg_sets = [set(m._regression_targets_list) for m in models]
+        inter_reg = set.intersection(*reg_sets)
+        # 첫 모델의 순서 보존
+        intersection_reg = [t for t in models[0]._regression_targets_list if t in inter_reg]
+
+        cls_sets = [set(m._classification_heads_dict.keys()) for m in models]
+        inter_cls = set.intersection(*cls_sets)
+        intersection_cls = {
+            k: v for k, v in models[0]._classification_heads_dict.items() if k in inter_cls
+        }
+
+        # dataset / metric 은 intersection 기준
+        regression_targets = intersection_reg
+        classification_heads = intersection_cls
+
         logger.info(f"ensemble union: sensor={union_sensor_inputs}, categorical={union_categorical_inputs}")
+        logger.info(f"ensemble 공통 회귀 헤드: {intersection_reg}")
+        logger.info(f"ensemble 공통 분류 헤드: {list(intersection_cls.keys())}")
 
     ckpt_epoch = int(ckpt.get("epoch", -1))
     if is_ensemble:
