@@ -1,7 +1,7 @@
 # damda AI 프로젝트 노트
 
 > 졸프 진행하며 쌓이는 핵심 메모와 명령어. 새로 알게 된 사실이나 자주 쓰는 명령이 생기면 이 파일에 갱신.
-> 마지막 업데이트: 2026-05-27 (v5 결과 — regression. v5.1 scanner_aug 약화 시작)
+> 마지막 업데이트: 2026-05-29 (v5.1 채택 / v5.5 실패 / evaluate.py 이종 ensemble 지원)
 
 ---
 
@@ -366,6 +366,39 @@ powershell -Command "Get-Content file.txt -Tail 5"
 ### 체크포인트 덮어쓰기 사고
 validation-mode 가 같은 `checkpoints/` 폴더에 쓰므로 본 학습 ckpt 위에 덮어쓸 위험.
 → 본 학습 끝나면 즉시 `ren checkpoints checkpoints_v?` 백업할 것.
+
+### evaluate.py `--ensemble` 이종 architecture 에러 (2026-05-29)
+
+증상 1 — sensor mismatch:
+```
+RuntimeError: mat1 and mat2 shapes cannot be multiplied (16x0 and 1x32)
+  → model.py 의 sensor_branch(sensor) 에서 발생
+```
+
+증상 2 — regression head 수 mismatch:
+```
+RuntimeError: The size of tensor a (5) must match the size of tensor b (4) at non-singleton dimension 1
+  → run_inference 의 reg_accum + o["regression"] 에서 발생
+```
+
+원인: ensemble 멤버들의 architecture 가 다른데 (예: v3 는 sensor 없음, v5.1 은 moisture sensor / v3 는 5 회귀 헤드, v5.1 은 4 헤드), dataset / metric 이 첫 ckpt 기준이라 mismatch.
+
+해결 (evaluate.py 의 구조):
+- **sensor / categorical**: 모든 멤버의 **union** 으로 dataset 구성. 각 모델은 자기 sensor_inputs_list 에 맞춰 column slice (모델별 `_sensor_inputs_list`, `_categorical_inputs_dict` 메타 부착)
+- **regression / classification 헤드**: 모든 멤버의 **intersection** (공통) 만 평균. dataset 도 intersection 으로 만들어 라벨 shape 일치. 각 모델 출력에서 `_regression_targets_list` index 로 column slice
+- 평가 결과의 composite / mean MAE / mean F1 은 intersection 헤드만 반영 → 단일 모델 평가 결과와 직접 비교 시 헤드 수 차이 주의
+
+검증 흐름:
+```cmd
+:: v3 (5 reg, sensor 없음) + v5.1 (4 reg, moisture sensor)
+python -m src.evaluate --config configs/baseline.yaml ^
+    --ensemble checkpoints_v3\epoch045.pt,checkpoints_v5.1\epoch048.pt ^
+    --split test --tta
+:: 로그 확인:
+::   ensemble union: sensor=['moisture'], categorical={}
+::   ensemble 공통 회귀 헤드: ['elasticity_mean', 'pore_value', 'pigmentation_value', 'wrinkle_value']
+::   ensemble 공통 분류 헤드: ['wrinkle_grade', 'pigmentation_grade', 'pore_grade', 'dryness_grade', 'sagging_grade', 'skin_type', 'sensitive']
+```
 
 ### 야간 학습 중 SSH 끊김 → 17h 뒤 PC 먹통 (2026-05-24~26 사고)
 
