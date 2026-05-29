@@ -188,6 +188,11 @@ class DamdaInferenceModel:
         )
         self.categorical_dim = sum(self.categorical_inputs.values())
 
+        # 학습 시 train.py 가 categorical ∩ classification_heads 자동 제거했으므로
+        # 추론 시에도 같은 제거 적용해야 state_dict mismatch 안 남
+        for col in self.categorical_inputs:
+            self.classification_heads.pop(col, None)
+
         # ---- 그 외 환경 설정 (yaml 우선, 없으면 ckpt) ----
         self.image_size: int = int(self.cfg["data"]["image_size"])
 

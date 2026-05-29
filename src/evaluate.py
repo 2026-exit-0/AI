@@ -521,6 +521,13 @@ def main() -> None:
         else dict(arch_cfg.get("data", {}).get("categorical_inputs", {}) or {})
     categorical_dim = sum(categorical_inputs.values())
 
+    # 학습 시 train.py 가 categorical ∩ classification_heads 자동 제거했으므로
+    # 평가 시에도 같은 제거 적용해야 state_dict mismatch 안 남
+    for col in categorical_inputs:
+        if col in classification_heads:
+            logger.info(f"classification_heads 에서 {col!r} 제거 (categorical_inputs 와 겹침)")
+            del classification_heads[col]
+
     model = DamdaSkinModel(
         backbone=arch_model["backbone"],
         pretrained=False,  # 어차피 ckpt 로 덮어쓸 거라 ImageNet 다운로드 불필요

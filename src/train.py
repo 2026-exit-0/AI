@@ -397,12 +397,18 @@ def main():
         save_every = cfg["logging"].get("save_every", 5)
         if epoch % save_every == 0 or improved:
             ckpt_path = out_dir / f"epoch{epoch:03d}.pt"
+            # 학습 시 실제 사용된 classification_heads (categorical 자동 제거 반영) 를 ckpt 의 cfg 에 저장
+            # → 미래 evaluate/infer 가 ckpt 만 보고 모델 architecture 재구성 가능 (mismatch 방지)
+            cfg_for_ckpt = {
+                **cfg,
+                "model": {**cfg["model"], "classification_heads": dict(classification_heads)},
+            }
             torch.save({
                 "epoch": epoch,
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "val_metrics": val_metrics,
-                "config": cfg,
+                "config": cfg_for_ckpt,
                 "regression_stats": regression_stats,
                 "sensor_stats": sensor_stats,
                 "sensor_inputs": sensor_inputs,
