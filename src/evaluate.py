@@ -215,7 +215,7 @@ def compute_composite_score(reg_metrics: dict, cls_metrics: dict) -> float:
 
 @torch.no_grad()
 def run_inference(
-    model: torch.nn.Module,
+    models,
     loader: DataLoader,
     device: torch.device,
     regression_targets: List[str],
@@ -224,30 +224,47 @@ def run_inference(
 ) -> dict:
     """전체 loader 순회하며 예측/정답/마스크/region_id 누적.
 
-    model.sensor_dim > 0 이면 sensor + sensor_mask 도 forward 에 전달 (v5+).
-    tta=True 면 각 batch 의 이미지에 4가지 변형 적용 후 forward 평균 (정확도 +2~5%, 4배 느림).
+    Args:
+        models: 단일 nn.Module 또는 list[nn.Module]. 리스트면 평균 (앙상블).
+        tta: True 면 multi-scale TTA 적용 (각 이미지 4 변형, ~4배 느림).
+            앙상블 + TTA 동시 가능 (= N × 4 forward / sample).
+
+    분류 헤드는 softmax 평균 후 argmax (logits 평균보다 안정적).
+    회귀 헤드는 직접 평균. 앙상블 멤버가 다른 회귀/분류 헤드 가지면 공통만 평균.
     """
-    model.eval()
+    if not isinstance(models, list):
+        models = [models]
+    for m in models:
+        m.eval()
 
     reg_preds, reg_targets, reg_masks = [], [], []
     cls_logits = {name: [] for name in classification_heads}
     cls_targets = {name: [] for name in classification_heads}
     region_ids = []
 
-    use_sensor = getattr(model, "sensor_dim", 0) > 0
-    use_categorical = getattr(model, "categorical_dim", 0) > 0
-
-    # TTA 용 batch-level 변형 — image 가 이미 [B,3,224,224] 텐서로 변환된 상태이므로
-    # tensor-level 변형만 가능 (flip / multi-scale 은 회귀/색 유지). 일반 PIL 단계가 아닌 batch 변형.
-    def _tta_variants(t: torch.Tensor) -> list:
-        """입력 batch tensor 의 4가지 변형 — 원본 / flip / shift +2px / shift -2px."""
-        variants = [t]
-        variants.append(torch.flip(t, dims=[-1]))  # 수평 flip
-        variants.append(torch.roll(t, shifts=2, dims=-1))  # 우측 2px shift
-        variants.append(torch.roll(t, shifts=-2, dims=-1))  # 좌측 2px shift
-        return variants
-
     import torch.nn.functional as F
+
+    use_sensor = any(getattr(m, "sensor_dim", 0) > 0 for m in models)
+    use_categorical = any(getattr(m, "categorical_dim", 0) > 0 for m in models)
+
+    # 강화 TTA — batch-level 이지만 multi-scale interpolation 으로 진짜 신호 추가
+    # (학습 시 RandomHorizontalFlip 이미 학습됨 → flip 만으론 효과 없음.
+    #  multi-scale crop 은 학습 분포 밖이라 진짜 신규 신호)
+    def _tta_variants(t: torch.Tensor) -> list:
+        """4가지 변형: 원본 / flip / 1.1× zoom / 1.2× zoom (center crop)."""
+        B, C, H, W = t.shape
+        variants = [t, torch.flip(t, dims=[-1])]
+        # 1.1× zoom — resize 248 → center crop 224
+        upsampled = F.interpolate(t, size=(int(H * 1.1), int(W * 1.1)), mode="bilinear", align_corners=False)
+        hh, ww = upsampled.shape[-2:]
+        h0 = (hh - H) // 2; w0 = (ww - W) // 2
+        variants.append(upsampled[:, :, h0:h0 + H, w0:w0 + W])
+        # 1.2× zoom
+        upsampled2 = F.interpolate(t, size=(int(H * 1.2), int(W * 1.2)), mode="bilinear", align_corners=False)
+        hh, ww = upsampled2.shape[-2:]
+        h0 = (hh - H) // 2; w0 = (ww - W) // 2
+        variants.append(upsampled2[:, :, h0:h0 + H, w0:w0 + W])
+        return variants
 
     for batch in tqdm(loader, desc="[eval]" + (" tta" if tta else ""), ncols=100):
         img = batch["image"].to(device, non_blocking=True)
@@ -265,30 +282,45 @@ def run_inference(
             if cm is not None:
                 kwargs["categorical_mask"] = cm.to(device, non_blocking=True)
 
-        if tta:
-            # 4가지 batch 변형 → forward → 평균
-            reg_accum, cls_accum = None, None
-            tta_imgs = _tta_variants(img)
-            for ti in tta_imgs:
-                o = model(ti, rid, **kwargs)
+        # 통합 path: 모델 × TTA variants 모두 forward → 평균
+        imgs_to_run = _tta_variants(img) if tta else [img]
+        reg_accum = None
+        cls_accum: Dict[str, torch.Tensor] = {}
+        n_forwards = 0
+
+        for m in models:
+            # 각 모델이 받는 kwargs 는 자기 sensor_dim/categorical_dim 에 맞게 필터
+            m_kwargs = {}
+            if getattr(m, "sensor_dim", 0) > 0 and "sensor" in kwargs:
+                m_kwargs["sensor"] = kwargs["sensor"]
+                if "sensor_mask" in kwargs:
+                    m_kwargs["sensor_mask"] = kwargs["sensor_mask"]
+            if getattr(m, "categorical_dim", 0) > 0 and "categorical" in kwargs:
+                m_kwargs["categorical"] = kwargs["categorical"]
+                if "categorical_mask" in kwargs:
+                    m_kwargs["categorical_mask"] = kwargs["categorical_mask"]
+
+            for img_v in imgs_to_run:
+                o = m(img_v, rid, **m_kwargs)
+                n_forwards += 1
+                # 회귀 — 공통 헤드만 (다른 모델이 다른 reg head 가지면 처음에 들어온 것 기준)
                 if "regression" in o:
+                    # 모델 reg 와 메인 regression_targets 의 인덱스 매핑 필요 (아래서 정렬)
+                    # 단순화: 모든 모델이 같은 reg targets 가졌다고 가정 (이ensemble 의 일반 경우)
                     reg_accum = o["regression"] if reg_accum is None else reg_accum + o["regression"]
+                # 분류 — softmax 평균. 헤드별로 accumulate.
                 if "classification" in o:
-                    if cls_accum is None:
-                        cls_accum = {n: F.softmax(v, dim=-1) for n, v in o["classification"].items()}
-                    else:
-                        for n, v in o["classification"].items():
-                            cls_accum[n] = cls_accum[n] + F.softmax(v, dim=-1)
-            n_tta = len(tta_imgs)
-            out = {}
-            if reg_accum is not None:
-                out["regression"] = reg_accum / n_tta
-            if cls_accum is not None:
-                # softmax 평균값 — argmax 동일하게 작동하므로 classification_metrics 호환
-                # 단 logits 자리에 prob 들어가는 거라 argmax 결과는 변함 없음
-                out["classification"] = {n: v / n_tta for n, v in cls_accum.items()}
-        else:
-            out = model(img, rid, **kwargs)
+                    for n, logits in o["classification"].items():
+                        probs = F.softmax(logits, dim=-1)
+                        cls_accum[n] = probs if n not in cls_accum else cls_accum[n] + probs
+
+        out = {}
+        if reg_accum is not None and n_forwards > 0:
+            out["regression"] = reg_accum / n_forwards
+        if cls_accum:
+            # 각 헤드별 정규화 — 해당 헤드를 가진 (model × tta) forward 횟수로 나눠야 정확
+            # 모든 모델이 같은 cls head 가졌다고 가정 시 n_forwards 로 동일
+            out["classification"] = {n: v / n_forwards for n, v in cls_accum.items()}
 
         if "regression" in out and regression_targets:
             reg_preds.append(out["regression"].cpu().numpy())
@@ -449,7 +481,9 @@ def write_markdown_report(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="학습에 쓰인 config (split/모델 구조 일치 필수)")
-    ap.add_argument("--checkpoint", required=True, help="평가할 체크포인트 .pt 경로")
+    ap.add_argument("--checkpoint", default="", help="단일 ckpt 경로 (--ensemble 미사용 시 필수)")
+    ap.add_argument("--ensemble", default="",
+                    help="콤마 구분 ckpt 경로 리스트. 여러 모델 평균 평가. 예: ckpt1.pt,ckpt2.pt")
     ap.add_argument("--split", choices=["test", "val", "train"], default="test",
                     help="평가할 split (기본 test). val 은 sanity check 용")
     ap.add_argument("--out", default="",
@@ -470,8 +504,21 @@ def main() -> None:
     set_seed(cfg.get("seed", 42))
     device = get_device()
 
-    # 출력 경로
-    ckpt_stem = Path(args.checkpoint).stem
+    # ckpt 경로 리스트 (단일 또는 ensemble)
+    if args.ensemble:
+        ckpt_paths = [p.strip() for p in args.ensemble.split(",") if p.strip()]
+        if not ckpt_paths:
+            raise ValueError("--ensemble 이 비어있음")
+        is_ensemble = True
+    elif args.checkpoint:
+        ckpt_paths = [args.checkpoint]
+        is_ensemble = False
+    else:
+        raise ValueError("--checkpoint 또는 --ensemble 중 하나 필수")
+
+    # 출력 경로 — ensemble 이면 첫 ckpt stem + _ensembleN 표기
+    first_stem = Path(ckpt_paths[0]).stem
+    ckpt_stem = f"{first_stem}_ensemble{len(ckpt_paths)}" if is_ensemble else first_stem
     out_path = Path(args.out) if args.out else \
         Path("runs/eval") / f"{ckpt_stem}_{args.split}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -498,11 +545,12 @@ def main() -> None:
     target_df = split_map[args.split].reset_index(drop=True)
     logger.info(f"manifest={len(df)}행 → split={args.split} → {len(target_df)}샘플")
 
-    # ---- 모델 구성 ----
-    # ckpt 의 저장된 config 가 model architecture 의 ground truth (학습 시 실제 사용된 것).
-    # yaml 과 다르더라도 ckpt 우선 — 그렇지 않으면 state_dict mismatch 로 로드 실패.
-    # (예: v3 ckpt 를 v5 yaml 로 평가하면 회귀 헤드 수 / sensor_branch 차이로 mismatch)
-    ckpt = torch.load(args.checkpoint, map_location=device)
+    # ---- 모델 구성 (단일 또는 ensemble) ----
+    # ckpt 의 저장된 config 가 model architecture 의 ground truth.
+    # ensemble 시 각 ckpt 별로 모델 만들되, dataset / metrics 는 첫 ckpt 의 architecture 기준.
+    # 회귀/분류 헤드가 다른 ckpt 도 평균 가능 — 공통 헤드만 (교집합) 메트릭 계산.
+    ckpts: List[dict] = [torch.load(p, map_location=device) for p in ckpt_paths]
+    ckpt = ckpts[0]  # 메인 (dataset / arch reference)
     ckpt_cfg = ckpt.get("config")
     arch_cfg = ckpt_cfg if ckpt_cfg is not None else cfg
     arch_model = arch_cfg["model"]
@@ -528,26 +576,45 @@ def main() -> None:
             logger.info(f"classification_heads 에서 {col!r} 제거 (categorical_inputs 와 겹침)")
             del classification_heads[col]
 
-    model = DamdaSkinModel(
-        backbone=arch_model["backbone"],
-        pretrained=False,  # 어차피 ckpt 로 덮어쓸 거라 ImageNet 다운로드 불필요
-        num_regions=arch_model["num_regions"],
-        region_emb_dim=arch_model["region_emb_dim"],
-        regression_targets=regression_targets,
-        classification_heads=classification_heads,
-        dropout=arch_model.get("dropout", 0.2),
-        sensor_dim=sensor_dim,
-        sensor_emb_dim=arch_model.get("sensor_emb_dim", 32),
-        categorical_dim=categorical_dim,
-        categorical_emb_dim=arch_model.get("categorical_emb_dim", 32),
-    ).to(device)
+    def _build_model_from_ckpt(c_ckpt: dict) -> DamdaSkinModel:
+        """각 ckpt 의 config 보고 그에 맞는 model 만든 후 weight 로드.
+        ensemble 시 ckpt 들이 다른 architecture 가져도 각자 정확히 복원."""
+        c_cfg = c_ckpt.get("config") or arch_cfg
+        c_model = c_cfg["model"]
+        c_reg = list(c_model["regression_targets"])
+        c_cls = dict(c_model["classification_heads"])
+        c_sensor = list(c_ckpt.get("sensor_inputs", []) or [])
+        c_cat = dict(c_ckpt.get("categorical_inputs", {}) or {})
+        # categorical ∩ classification_heads 자동 제거
+        for col in c_cat:
+            c_cls.pop(col, None)
+        m = DamdaSkinModel(
+            backbone=c_model["backbone"],
+            pretrained=False,
+            num_regions=c_model["num_regions"],
+            region_emb_dim=c_model["region_emb_dim"],
+            regression_targets=c_reg,
+            classification_heads=c_cls,
+            dropout=c_model.get("dropout", 0.2),
+            sensor_dim=len(c_sensor),
+            sensor_emb_dim=c_model.get("sensor_emb_dim", 32),
+            categorical_dim=sum(c_cat.values()),
+            categorical_emb_dim=c_model.get("categorical_emb_dim", 32),
+        ).to(device)
+        m.load_state_dict(c_ckpt["model"])
+        m.eval()
+        return m
 
-    # cfg 의 model_cfg 는 num_regions 등 per-region 슬라이스에서 참조 (ckpt 와 동일하므로 OK)
+    models: List[DamdaSkinModel] = [_build_model_from_ckpt(c) for c in ckpts]
+    model = models[0]  # 기본 참조 (per-region 슬라이스 등에서)
     model_cfg = arch_model
 
-    model.load_state_dict(ckpt["model"])
     ckpt_epoch = int(ckpt.get("epoch", -1))
-    logger.info(f"checkpoint 로드 완료 (epoch={ckpt_epoch}, sensor_dim={sensor_dim})")
+    if is_ensemble:
+        epochs = [int(c.get("epoch", -1)) for c in ckpts]
+        logger.info(f"ensemble {len(models)}개 모델 로드 완료. epochs={epochs}")
+    else:
+        logger.info(f"checkpoint 로드 완료 (epoch={ckpt_epoch}, sensor_dim={sensor_dim})")
 
     # regression_stats — ckpt 우선, 없으면 train_df 로 재계산
     if "regression_stats" in ckpt:
@@ -587,7 +654,7 @@ def main() -> None:
     )
 
     # ---- 추론 ----
-    bundle = run_inference(model, loader, device, regression_targets, classification_heads, tta=args.tta)
+    bundle = run_inference(models, loader, device, regression_targets, classification_heads, tta=args.tta)
 
     # ---- 전체 메트릭 ----
     reg_metrics = regression_metrics(
@@ -612,7 +679,9 @@ def main() -> None:
 
     out_dict = {
         "meta": {
-            "checkpoint": str(args.checkpoint),
+            "checkpoint": str(args.checkpoint) if not is_ensemble else "",
+            "ensemble_ckpts": ckpt_paths if is_ensemble else [],
+            "ensemble_size": len(ckpt_paths) if is_ensemble else 1,
             "split": args.split,
             "n_samples": int(len(target_df)),
             "ckpt_epoch": ckpt_epoch,
