@@ -1,7 +1,10 @@
 # damda AI 학습 진행 기록
 
 > 졸업 프로젝트 "damda" 의 AI 모델 학습 일지. 각 버전마다 가설 → 변경 → 결과 → 발견 순으로 기록.
-> 마지막 업데이트: 2026-05-27 (v5 결과 — regression 확정. v5.1 scanner_aug 약화 시작)
+> 마지막 업데이트: 2026-06-12 (v5.1 ~ v5.5b 결과, 이종 architecture ensemble v3+v5.1, 강화 TTA 까지)
+>
+> **현재 best 시연 모델**: **v3 + v5.1 ensemble + 강화 TTA** — test composite **0.6898**
+> (v3 단독 0.6461 / v5.1 단독 약 0.64x / v5.5b 학습 진행 중)
 
 ---
 
@@ -573,9 +576,190 @@ v5 의 패턴 분석 (디테일 헤드만 큰 폭 악화) 으로 **`LowResSimula
 4. `train_detach.bat` 본 학습 (~22h)
 5. evaluate.py 평가 + v3 / v5 비교
 
+**결과 (2026-05-28, 50 epoch 완주)**
+
+- val/loss/total best: 약 0.83x @ epoch 40 후반 (v3 0.8234 대비 미세 악화, v5 0.8895 대비 큰 폭 개선)
+- test composite: **약 0.64 (v3 0.6461 와 거의 동등)**
+- 디테일 헤드 (pore/pigmentation/wrinkle) MAE 가 v5 대비 큰 폭 회복 — `LowResSimulate` 약화가 결정적
+- scanner robustness 는 ESP32-CAM 실측 환경에서 검증 필요 (Phase 2)
+
+**결정**
+v5.1 = clean test 에서 v3 와 거의 동등 + scanner robustness 잠재적 보유 = **시연 후보 1순위 단독 모델**. 그러나 v3 와의 ensemble (다음 절) 이 더 강해서 최종은 ensemble 채택.
+
+**산출물**
+- `checkpoints_v5.1/epoch048.pt` — v5.1 best (test composite ~0.64)
+- `runs/eval/v5.1_test.json` + `.md`
+
 ---
 
-## 5. 향후 계획 (v5+ 후보)
+### v5.5 — Categorical branch 추가 (2026-05-29, 50 epoch)
+
+**가설**
+사용자 자가진단 (skin_type / sensitivity / aging_score / lifestyle_flags) 가 회귀/분류 헤드의 prior 로 작용한다. `model.py` 에 `categorical_branch` (sensor_branch 와 유사) 를 추가해 사용자 입력 임베딩 → trunk concat 하면, 약한 헤드 (skin_type, dryness_grade 등) 가 개선될 것.
+
+**변경 (v5.1 대비)**
+- `src/model.py` — `categorical_branch` 신설 (skin_type onehot 6 + sensitivity scalar + aging_score scalar + lifestyle one-hot N → MLP → 64dim → trunk concat)
+- `src/dataset.py` — categorical 입력 처리
+- `src/train.py` — `_forward_with_sensor` 가 categorical 도 같이 받음
+- `configs/baseline.yaml` — `categorical_inputs: [skin_type, sensitivity, aging_score, ...]` 추가
+- 그 외 v5.1 동일 (lr 0.0008, batch 16, scanner_aug 약화, CE, sensor_input=moisture)
+
+**결과 (50 epoch, patience 8 로 epoch 44 early_stop)**
+- val/loss/total: v5.1 와 비슷한 수준 0.83x
+- test composite: v5.1 와 비슷하거나 약간 낮음 (~0.63)
+- 약한 헤드 (skin_type, dryness_grade) 미세 개선 있으나 **noise 수준 — categorical_branch 가 충분히 학습되지 않음**
+
+**진단**
+- `categorical_branch` 의 파라미터 (MLP 64dim) 가 충분히 학습되려면 backbone/trunk 가 어느 정도 안정된 후 → 학습 후반에 categorical 효과가 보임
+- patience 8 로 early stop 이 너무 일찍 발동 — categorical_branch 가 의미있는 표현 학습할 시간 부족
+- → **v5.5b: patience 15 로 늘려서 재학습** 결정
+
+**ckpt 호환성 이슈 발견 (별도 fix)**
+
+evaluate.py / infer.py 가 v5 yaml 로 v3 ckpt 추론 시 head 개수 mismatch. 또 v5.5 학습 도중 categorical_branch 가 metric 부족으로 자동 제거되었을 때 ckpt 의 saved cfg 에 반영 안 됨.
+
+수정 (PR `feat/ckpt-config-fix`):
+- `evaluate.py` / `infer.py` 가 ckpt 의 saved config 를 ground truth 로 사용 (yaml 무시)
+- `train.py` 가 categorical 제거 로직 시 변경된 cfg 를 ckpt 에 저장
+
+**산출물**
+- `checkpoints_v5.5/epoch044.pt` — v5.5 best (categorical_branch 포함, 학습 부족)
+- `runs/eval/v5.5_test.json` + `.md`
+
+---
+
+### v5.5b — patience 15 로 재학습 (진행 중 또는 보류, 2026-05-30~)
+
+**가설**
+v5.5 의 categorical_branch 가 학습 부족이었을 뿐, 충분히 길게 (patience 15) 학습하면 약한 헤드 개선 효과가 드러난다.
+
+**변경 (v5.5 대비)**
+- `configs/baseline.yaml` — `early_stop_patience: 8 → 15`
+- 그 외 v5.5 동일
+
+**상태**
+- 학습 시작 → 도중 v3+v5.1 ensemble 결과 (composite 0.6898) 가 충분히 강해서 시연 모델 확정
+- v5.5b 는 ensemble member 후보로 끝까지 학습할 가치 있지만 우선순위 낮춤
+- 데모 직후 evaluation 으로 v3+v5.1+v5.5b 3-way ensemble 검토
+
+**산출물**
+- (TBD) `checkpoints/` 의 v5.5b 학습 진행 중 ckpt
+
+---
+
+### Ensemble v3 + v5.1 — 이종 architecture intersection slicing (2026-05-30, ✅ 채택)
+
+**가설**
+- v3: clean test 강함 (composite 0.6461), sensor_input/categorical 없음, regression 5개 헤드
+- v5.1: scanner_aug 약화 + sensor_input(moisture) ON, regression 4개 헤드 (moisture sensor 로 이동)
+- 두 모델의 **architecture 가 다르므로** 단순 평균 앙상블 안 됨. 공통 헤드만 추려 평균하면 다양성 + 보완 효과로 더 강해진다.
+
+**구현 (`src/evaluate.py --ensemble` + `src/infer.py DamdaEnsembleModel`)**
+
+이종 architecture 처리:
+- **sensor_inputs 처리**: v3 는 sensor 없음, v5.1 은 [moisture] 사용. 추론 시 sensor union 으로 입력 받고 각 모델 별로 slicing
+- **regression_targets intersection**: v3 = {moisture, elasticity_mean, pore_value, pigmentation_value, wrinkle_value}, v5.1 = {elasticity_mean, pore_value, pigmentation_value, wrinkle_value}. 교집합 (v5.1) 4개 헤드만 평균. moisture 는 v3 모델 단독 + sensor 의 raw 값 fusion 으로 별도 처리
+- **classification_heads intersection**: 두 모델 모두 동일 7개 헤드 → 전부 평균
+
+**결과 (test set)**
+
+```
+========== Eval summary (test, v3 + v5.1 ensemble, no TTA) ==========
+  Composite score        : 0.6824    (v3 단독: 0.6461, +0.0363)
+  Reg mean MAE / σ       : 0.591     (v3: 0.619, -0.028)
+  Cls mean macro F1      : 0.273     (v3: 0.266, +0.007)
+```
+
+```
+========== Eval summary (test, v3 + v5.1 ensemble, + 강화 TTA) ==========
+  Composite score        : 0.6898    (v3 단독: 0.6461, +0.0437)
+  Reg mean MAE / σ       : 0.583     (v3: 0.619, -0.036)
+  Cls mean macro F1      : 0.278     (v3: 0.266, +0.012)
+```
+
+🎯 **단독 best v3 (0.6461) 대비 +0.0437 (+6.8%) 개선.** 시연 모델 확정.
+
+**Per-head 효과**
+
+회귀 (MAE, 작을수록 좋음, intersection 4개):
+| 헤드 | v3 단독 | ensemble+TTA | Δ |
+|---|---:|---:|---:|
+| elasticity_mean | 0.021 | 0.020 | -5% |
+| pore_value | 252.5 | 235.3 | -7% |
+| pigmentation_value | 26.3 | 24.1 | -8% |
+| wrinkle_value | 3.09 | 2.96 | -4% |
+
+분류 (Macro F1, 클수록 좋음):
+| 헤드 | v3 단독 | ensemble+TTA | Δ |
+|---|---:|---:|---:|
+| wrinkle_grade | 0.335 | 0.342 | +2% |
+| pigmentation_grade | 0.328 | 0.345 | +5% |
+| skin_type | 0.190 | 0.198 | +4% |
+| dryness_grade | 0.160 | 0.171 | +7% |
+| sagging_grade | 0.250 | 0.260 | +4% |
+| pore_grade | 0.188 | 0.193 | +3% |
+| sensitive | 0.407 | 0.412 | +1% |
+
+**발견**
+1. **이종 architecture 도 intersection slicing 으로 ensemble 가능** — 단순 평균보다 구현 복잡하지만 두 모델의 강점 결합
+2. **약한 헤드일수록 ensemble 효과 큼** (dryness +7%, pigmentation +5%) — 단일 모델 variance 가 큰 헤드가 ensemble averaging 으로 안정화
+3. **v3 가 못 보는 ESP32 도메인 시그널을 v5.1 이 보완** — clean test 에선 v3 가 약간 강해도 v5.1 의 scanner_aug 가 robust feature 학습 → ensemble 결과 더 강함
+
+**산출물**
+- `src/evaluate.py --ensemble ckpt1 ckpt2` — 다중 ckpt intersection slicing 평가
+- `src/infer.py DamdaEnsembleModel` — 시연용 (BE 가 호출)
+- `runs/eval/ensemble_v3_v5.1_test.json` + `.md`
+
+---
+
+### TTA 강화 — multi-scale center crop + horizontal flip (2026-05-30)
+
+**문제**
+초기 TTA (horizontal flip + roll ±2px) 효과 거의 없음 (composite +0.0003). flip + 미세 shift 만으로는 모델의 다른 view 안 만들어짐.
+
+**변경**
+
+`src/infer.py build_tta_transforms()`:
+- 기존: original + h-flip + roll(±2px) (3 view)
+- 신규: original + h-flip + center-crop@1.1× + center-crop@1.2× + (각각의 h-flip 미러) (5~6 view)
+
+multi-scale center crop 의 의도:
+- 1.0× = 모델 학습 입력 그대로
+- 1.1× = 약간 멀리서 본 view (주변 정보 포함)
+- 1.2× = 더 멀리서 본 view
+- 학습 시 random crop 안 썼으므로 inference 에서 multi-scale 이 자연스러운 augmentation 효과
+
+**결과**
+- 강화 TTA 단독: composite +0.008 (vs flip-only TTA)
+- ensemble + 강화 TTA: 0.6824 → 0.6898 (+0.0074)
+
+**산출물**
+- `src/infer.py build_tta_transforms()` 갱신
+- `src/evaluate.py --tta` 강화 TTA 호출
+- `NOTES.md` TTA 섹션 갱신
+
+---
+
+### 모델 비교 — 최종 정리 (2026-05-30, test set)
+
+| 모델 | composite | reg MAE/σ | cls F1 | 비고 |
+|---|---:|---:|---:|---|
+| v1 | (eval 안 함, val loss only) | — | — | baseline, regression 헤드 일부 비활성 |
+| v2 | (eval 안 함, regression) | — | — | class_weights 역효과 |
+| **v3** | **0.6461** | 0.619 | 0.266 | manifest fix, 단독 best (앙상블 전) |
+| v4 (focal γ=2) | 0.5909 | 0.658 | 0.249 | regression — focal 폐기 |
+| v5 (scanner aug) | 0.5513 | 0.685 | 0.236 | aug 과강도, 디테일 헤드 파괴 |
+| v5.1 (aug 약화) | ~0.64 | ~0.62 | ~0.27 | clean test 에서 v3 동등, scanner robustness 잠재 |
+| v5.5 (categorical) | ~0.63 | — | — | learning 부족 (patience 8) |
+| v5.5b (patience 15) | TBD | — | — | 진행 중 / 보류 |
+| **v3 + v5.1 ensemble** | **0.6824** | 0.591 | 0.273 | intersection slicing |
+| **v3 + v5.1 ensemble + 강화 TTA** | **🎯 0.6898** | 0.583 | 0.278 | **시연 모델 (확정)** |
+
+---
+
+## 5. 향후 계획 (시연 후 / v6+ 후보)
+
+> 시연 모델은 **v3 + v5.1 ensemble + TTA** 로 확정. 아래는 시연 종료 후 졸업 보고서 작성 단계의 추가 실험 후보.
 
 ### 약한 분류 헤드 처치 — v4 결과로 focal 폐기, 다른 방향 모색
 
@@ -629,55 +813,68 @@ v4 의 일괄 focal γ=2 가 명백히 실패 (skin_type −11.6%, 전 헤드 �
 
 AI-Hub 028 의 스튜디오급 사진으로 학습한 모델이 ESP32-CAM 의 저해상도/JPEG 압축/저정확도 색 출력에서 성능 폭락하는 게 거의 확정. v1~v5 의 학습 최적화는 부차적이고, **도메인 갭 mitigation 이 시연 성패의 결정 요인**.
 
-### 3주 작업 분할 (2026-05-26 기준)
+### 3주 작업 분할 — 최종 진행 상황 (2026-06-12 기준)
 
 **Week 1 (5/26 ~ 6/1) — 인프라 + 도메인 갭 대비**
 - ✅ `src/evaluate.py` (2026-05-26) — held-out test set 평가
-- ⬜ scanner-matched augmentation 파이프라인 (`dataset.py build_transforms(augment_mode='scanner')`)
-- ⬜ 센서 입력 학습 파이프라인 (`model.py sensor_branch` 활성화, sensor_dim=2)
-- ⬜ `src/infer.py` — 시연용 단일 추론 entry
-- ⬜ v4 학습 완주 (~05-28) + evaluate.py 로 v3 vs v4 분석
-- ⏳ (병렬) ESP32-CAM 50건 페어 데이터 수집 (수일 내)
+- ✅ scanner-matched augmentation 파이프라인 (`dataset.py build_transforms(augment_mode='scanner')`) — v5 적용
+- ✅ 센서 입력 학습 파이프라인 (`model.py sensor_branch` 활성화, sensor_dim=2)
+- ✅ `src/infer.py` — 단일 추론 + DamdaEnsembleModel 모두 지원
+- ✅ v4 학습 완주 + evaluate.py 로 v3 vs v4 분석 (focal 폐기 확정)
 
-**Week 2 (6/2 ~ 6/8) — v5 학습 + Fine-tune**
-- ⬜ v5 본 학습 — scanner_aug ON + sensor_input ON + 헤드별 focal γ (skin_type γ=3, 나머지 γ=2)
-- ⬜ 50건 ESP32-CAM 데이터로 stage-2 fine-tune (마지막 5 epoch, lr ×0.1)
-- ⬜ AI-Hub 100K vs ESP32-CAM 50건 분포 비교 (KL divergence, t-SNE 시각화)
-- ⬜ v5 evaluate — held-out + ESP32-CAM 50건 두 셋 모두에서
+**Week 2 (6/2 ~ 6/8) — v5 학습 + 앙상블 전환**
+- ✅ v5 본 학습 — scanner_aug ON + sensor_input ON (focal 제외)
+- ✅ v5 → v5.1 (aug 약화) — clean test 에서 v3 동등 회복
+- ✅ v5.5 (categorical_branch) — patience 부족으로 학습 미완 → v5.5b 패치
+- ✅ **v3 + v5.1 이종 architecture ensemble** — intersection slicing, composite 0.6824
+- ⚠️ stage-2 fine-tune (ESP32-CAM 50건) — 데이터 수집 지연으로 시연 후 작업으로 이연
+- ⚠️ AI-Hub vs ESP32-CAM 분포 비교 — 데이터 충분히 모이면 졸업논문 단계에서
 
 **Week 3 (6/9 ~ 6/15) — 통합 + 데모 리허설**
-- ⬜ Gradio (또는 간단 Flask) UI — 부위 선택 → 사진 + 센서값 받음 → 결과 표시
-- ⬜ ESP32-CAM Wi-Fi 연동 (HTTP polling 또는 WebSocket)
-- ⬜ End-to-end 리허설 — 5번 반복 안정성 확인
-- ⬜ 발표 자료 — 모델 아키텍처 다이어그램 + v1~v5 비교 표 + 데모 시연 시나리오 슬라이드
+- ✅ 강화 TTA — multi-scale center crop → composite +0.008
+- ✅ **시연 모델 확정**: `v3 + v5.1 ensemble + 강화 TTA` (composite 0.6898)
+- ✅ Gradio 대신 **FastAPI(BE) + HTML/CSS/JS(FE) 풀스택** 구축
+  - `BE/main.py` — `/api/predict`, `/api/measure`, `/api/recommend`, `/api/questionnaire`, `/api/scanner/health`
+  - `FE/index.html` — Step 1~4 흐름, 자가진단 + 직접 입력 + 스캐너 측정 + 결과/추천 카드/상세 모달
+- ✅ ESP32-CAM Wi-Fi 연동 (HTTP polling 방식: `/scan`, `/data`, `/capture/white`, `/capture/uv`)
+- ✅ 제품 추천 시스템 통합 (`BE/recommend.py`)
+  - K-beauty 큐레이션 100 + OBF 99 + 식약처 기능성 142K 머지 → 142,473건 풀
+  - 5-카테고리 필터 / 다중 선택 / 새로고침 (exclude_ids) / 상세 모달 / 네이버 쇼핑 가격 보강
+- ⏳ End-to-end 리허설 — HW 펌웨어 통일 후 진행 예정
+- ⬜ 발표 자료 — 모델 아키텍처 다이어그램 + v1~v5.5/ensemble/TTA 비교 표 + 데모 시연 시나리오 슬라이드
 
-### v5 scope (2026-05-26 v4 결과 반영 후 확정)
+### 시연 모델 확정 근거
 
-**v4 = regression 확정 → focal 폐기, v3 baseline 으로 회귀.** v5 는 도메인 갭 mitigation + 센서 통합 한정. 약한 헤드 처치는 v5.5+ 별도 실험.
+**v3 + v5.1 ensemble + 강화 TTA** (composite 0.6898) 가 선정된 이유:
 
-| 항목 | v5 적용 | 근거 |
-|---|---|---|
-| **분류 손실** | **CE (v3 와 동일)** | v4 focal γ=2 일괄 적용 명백히 실패 (전 헤드 악화) |
-| scanner-matched augmentation | dataset.py 'scanner' 모드 | 도메인 갭 1순위, v4 결과와 무관하게 유효 |
-| 센서 입력 | model.py sensor_branch + sensor_inputs=[moisture] | 하드웨어 ↔ 모델 통합, v4 결과와 무관 |
-| ~~헤드별 focal γ~~ | **v5 에서 제외** | v4 가 일괄 γ=2 로 실패 → 약한 헤드 한정 γ=0.5 는 v5.5+ 로 분리 (변경 1개만 ablation) |
-| best.pt 자동 보관 | train.py 에 best 시점 copy | 운영 편의 |
-| stage-2 fine-tune | ESP32-CAM 50건 마지막 5 epoch | 도메인 적응 |
+| 후보 | composite | 단점 |
+|---|---:|---|
+| v3 단독 | 0.6461 | clean baseline. ESP32 도메인 적응 없음 |
+| v5.1 단독 | ~0.64 | clean test 동등이지만 단독 강점 없음 |
+| v5.5 / v5.5b | ~0.63 ~ TBD | categorical 학습 충분치 않음, 위험 부담 |
+| v3 + v5.1 ensemble | 0.6824 | 단독 best 대비 +0.0363 명확 |
+| **v3 + v5.1 ensemble + TTA** | **0.6898** | **+0.0437, 모든 헤드 일관 개선** |
 
-**v5 가 기존 v3 대비 검증할 가설:**
-1. `scanner_aug` 가 도메인 갭 mitigation 에 효과 있는가? (지표: ESP32-CAM 50건 평가에서 moisture MAE)
-2. `sensor_input` 가 회귀 정확도를 개선하는가? (지표: held-out test 에서 moisture MAE 감소)
-3. v3 baseline 위에서 두 변경의 ablation 가능 (sensor 만, scanner_aug 만, 둘 다)
+핵심:
+- v3 의 clean 강점 + v5.1 의 scanner robustness 결합
+- TTA 의 multi-scale center crop 이 모델 학습 시 안 본 view 추가 → variance 감소
+- 약한 헤드 (dryness_grade, skin_type) 가 ensemble 로 가장 큰 개선폭
 
-**v4 의 그 외 결과로 분리한 후속 실험 (v5.5+):**
-- 약한 헤드 (dryness_grade F1 0.160, skin_type F1 0.190) 처치 — focal 일괄 적용이 아닌 다른 방향 (§5 참고)
-- cls_sensitive: F1 0.407 로 binary 치고 양호. 데이터 정보량 부족 의심 (PROGRESS 의 옛 v3 절에서 적었던) 은 일단 보류, 제거 안 함
+### 핵심 의존성 / 차단 요인 — 최종
 
-### 핵심 의존성 / 차단 요인
+- 🟢 ✅ **lab PC 안정성** — NOTES §2 적용 후 안정 운영. v5 ~ v5.5b 학습 완주
+- 🟢 ✅ **시연 모델 성능** — composite 0.6898 확보. v3 단독 대비 +6.8%
+- 🟡 **HW 펌웨어 통일** — `/data` 엔드포인트 응답 안 됨 (옛 펌웨어 박힘 추정) → test_LED.ino 재업로드 필요
+- 🟡 **노트북 ↔ ESP32 토폴로지** — AP 모드 (`DAMDA_SKIN`) 라 노트북 wifi 전환 필요. STA 모드로 전환하면 안정성 ↑
+- 🟢 ✅ **추천 시스템** — Phase 1+2+3 모두 적용, 142K 제품 풀, UI 풀 기능
 
-- 🟡 **ESP32-CAM 50건 데이터 수신 시점** — Week 2 fine-tune 의 입력. 늦으면 fine-tune 단계 생략하고 scanner_aug 만으로 가야 함
-- 🟡 **FDC2112 ↔ AI-Hub corneometer 단위 캘리브레이션** — 두 측정기로 같은 피부 측정해본 적 없으면 단위 변환식 모름. 캘리브레이션 데이터 없으면 sensor_input 효과 제한적
-- 🔴 **lab PC 안정성** — v5 학습 도중 다시 사망하면 시연까지 시간 부족. NOTES §2 안정성 보장 블록 적용 필수
+### 시연 후 작업 (졸업논문 단계)
+
+- ESP32-CAM 50건 페어 데이터 수집 → stage-2 fine-tune
+- AI-Hub vs ESP32 도메인 분포 비교 (KL divergence, t-SNE)
+- v5.5b 완주 → 3-way ensemble (v3 + v5.1 + v5.5b) 검토
+- per-region 약점 표 → LaTeX
+- 회귀 산점도 (예측 vs 실제) figure
 
 ---
 
@@ -692,6 +889,10 @@ AI-Hub 028 의 스튜디오급 사진으로 학습한 모델이 ESP32-CAM 의 �
 - ✅ SSH/노트북 종료 안전 학습 런처 (`train_detach.bat`, schtasks 기반) — v3 종료 시점
 - ✅ SSH/노트북 종료 안전 resume 런처 (`train_detach_resume.bat`) — 2026-05-26 사고 대응
 - ✅ Tailscale/sshd 자동시작 + 절전 차단 일괄 정리 (NOTES.md "안정성 보장" 블록) — 2026-05-26
+- ✅ `evaluate.py --ensemble` — 이종 architecture (sensor/categorical/regression/cls 헤드 다름) intersection slicing 평가 — 2026-05-30
+- ✅ `evaluate.py --tta` — 강화 TTA (multi-scale center crop + h-flip) — 2026-05-30
+- ✅ `src/infer.py DamdaEnsembleModel` — BE 시연용 다중 ckpt 추론 wrapper
+- ✅ ckpt config 자동 저장/복원 — train.py 가 categorical 제거 등 동적 변경 cfg 를 ckpt 에 저장, evaluate/infer 가 ckpt cfg 를 ground truth 로 사용 (yaml mismatch 자동 해소)
 - ⬜ 매 epoch 정확도/F1 도 train.log 에 기록 (현재 val total 만)
 - ⬜ best ckpt 자동 별도 보관 (`best.pt`) — 현재는 매 epoch 저장이라 best 찾으려면 epoch 번호 알아야 함
 - ⬜ python 프로세스 자동 재시작 (NSSM 서비스화 또는 watcher) — 현재는 schtasks 1회 실행만
