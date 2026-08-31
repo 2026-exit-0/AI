@@ -98,10 +98,43 @@ class GaussianNoiseTensor:
         return (t + torch.randn_like(t) * std).clamp(0.0, 1.0)
 
 
+class MacroPatchCrop:
+    """부위 이미지에서 작은 정사각 패치를 떼어(=접사 화각 시뮬) 뒤에서 224로 확대되게 함.
+
+    ESP32-CAM 접사 스캔(scan_images)은 얼굴 부위의 극히 일부만 담는다. AI-Hub 부위
+    이미지를 그 배율에 맞추려면 부위의 scale_range 비율만큼만 잘라야 한다
+    (calibrate_crop.py 로 HW 텍스처 스펙트럼과 매칭해 [0.12, 0.20] 산출).
+
+    train=True  : scale_range 에서 무작위 + 무작위 위치 (증강)
+    train=False : scale_range 중앙값 + 중앙 위치 (결정론적 — val/test가 macro 도메인 반영)
+    """
+
+    def __init__(self, scale_range: Tuple[float, float] = (0.12, 0.20), train: bool = True):
+        self.scale_range = scale_range
+        self.train = train
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        w, h = img.size
+        mn = min(w, h)
+        if self.train:
+            s = random.uniform(self.scale_range[0], self.scale_range[1])
+        else:
+            s = (self.scale_range[0] + self.scale_range[1]) / 2.0
+        side = max(8, min(int(mn * s), mn))
+        if self.train:
+            left = random.randint(0, max(0, w - side))
+            top = random.randint(0, max(0, h - side))
+        else:
+            left = (w - side) // 2
+            top = (h - side) // 2
+        return img.crop((left, top, left + side, top + side))
+
+
 def build_transforms(
     image_size: int = 224,
     train: bool = True,
     augment_mode: str = "normal",
+    crop_scale: Tuple[float, float] = (0.12, 0.20),
 ) -> transforms.Compose:
     """ResNet-50 표준 전처리.
 
@@ -116,18 +149,24 @@ def build_transforms(
                         JPEG compression + Gaussian noise 를 추가.
                         도메인 갭 (AI-Hub 학습 vs ESP32-CAM 시연) 대비.
                         Phase 2 / v5 부터 사용 예정. 상세는 NOTES.md 8절 참고.
+            'macro'   — 접사(contact-macro) 도메인 적응. 부위 이미지를 crop_scale 비율의
+                        작은 패치로 잘라(=화각 축 보정) 224로 확대 후 가벼운 blur/jpeg/noise.
+                        AI-Hub 얼굴부위 → HW 접사 스캔 도메인 매칭용 (v6-macro).
+        crop_scale: 'macro' 모드에서 부위 대비 패치 크기 비율 범위 (calibrate_crop.py 산출).
     """
+    mode = (augment_mode or "normal").lower()
+    if mode not in ("normal", "scanner", "macro"):
+        raise ValueError(f"augment_mode 는 'normal' | 'scanner' | 'macro' 만 허용 (got: {augment_mode!r})")
+
     if not train:
-        # 평가/추론 transform 은 augment_mode 와 무관 — 결정론적
-        return transforms.Compose([
+        # 평가/추론 transform 은 결정론적. macro 모드는 val/test 도 접사 도메인을 반영해야
+        # 하므로 중앙 macro 패치 크롭을 적용(추론 시 HW 이미지는 이미 접사라 별도 crop 불필요).
+        pre = [MacroPatchCrop(crop_scale, train=False)] if mode == "macro" else []
+        return transforms.Compose(pre + [
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ])
-
-    mode = (augment_mode or "normal").lower()
-    if mode not in ("normal", "scanner"):
-        raise ValueError(f"augment_mode 는 'normal' | 'scanner' 만 허용 (got: {augment_mode!r})")
 
     if mode == "normal":
         return transforms.Compose([
@@ -137,6 +176,25 @@ def build_transforms(
             transforms.RandomRotation(degrees=10),
             transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.05, hue=0.02),
             transforms.ToTensor(),
+            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            transforms.RandomErasing(p=0.25, scale=(0.02, 0.10), ratio=(0.5, 2.0)),
+        ])
+
+    if mode == "macro":
+        # 접사 도메인 적응 (v6-macro): 부위 → 작은 패치(화각 보정) → 224 확대 → 가벼운 열화.
+        # LowResSimulate 는 뺀다 — 패치 확대 자체가 저해상 효과를 내므로 이중 파괴 방지.
+        # HW 접사의 뿌연/차가운 톤은 blur+jpeg+colorjitter 로 흡수. calibrate_crop.py 로 scale 확정.
+        return transforms.Compose([
+            MacroPatchCrop(crop_scale, train=True),
+            transforms.Resize((image_size + 24, image_size + 24)),
+            transforms.RandomCrop(image_size),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(degrees=10),
+            GaussianBlurRandom(radius_range=(0.2, 0.8), p=0.3),
+            transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.05, hue=0.02),
+            JPEGCompress(quality_range=(60, 85), p=0.4),
+            transforms.ToTensor(),
+            GaussianNoiseTensor(std_range=(0.0, 0.025), p=0.4),
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
             transforms.RandomErasing(p=0.25, scale=(0.02, 0.10), ratio=(0.5, 2.0)),
         ])
@@ -264,6 +322,7 @@ class DamdaSkinDataset(Dataset):
         train: bool = True,
         regression_stats: Dict[str, Dict[str, float]] = None,
         augment_mode: str = "normal",
+        crop_scale: Tuple[float, float] = (0.12, 0.20),
         sensor_inputs: List[str] = None,
         sensor_stats: Dict[str, Dict[str, float]] = None,
         # v5.5: categorical inputs (사용자 자가입력 — skin_type / sensitive 등)
@@ -274,7 +333,9 @@ class DamdaSkinDataset(Dataset):
         self.regression_targets = regression_targets
         self.classification_heads = classification_heads
         self.augment_mode = augment_mode
-        self.transform = build_transforms(image_size, train, augment_mode=augment_mode)
+        self.crop_scale = tuple(crop_scale)
+        self.transform = build_transforms(image_size, train, augment_mode=augment_mode,
+                                          crop_scale=self.crop_scale)
         # 회귀 정규화 통계 (train.py 에서 학습셋 기준으로 계산해 주입)
         self.regression_stats = regression_stats or {
             col: {"mean": 0.0, "std": 1.0} for col in regression_targets

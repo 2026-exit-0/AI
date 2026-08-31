@@ -250,6 +250,10 @@ def main():
     # augment_mode: 'normal' (기본) | 'scanner' (ESP32-CAM 시연 환경 시뮬, v5+)
     augment_mode = cfg["data"].get("augment_mode", "normal")
     logger.info(f"augment_mode = {augment_mode}")
+    # macro 모드(v6): 부위 → 접사 패치 크롭 스케일 범위 (calibrate_crop.py 산출)
+    crop_scale = tuple(cfg["data"].get("crop_scale", [0.12, 0.20]))
+    if augment_mode == "macro":
+        logger.info(f"crop_scale = {crop_scale}")
 
     # sensor 입력 (v5+). 빈 리스트면 sensor 비활성 → model.sensor_dim=0
     sensor_inputs = cfg["data"].get("sensor_inputs", []) or []
@@ -300,6 +304,7 @@ def main():
                                 image_size=cfg["data"]["image_size"], train=True,
                                 regression_stats=regression_stats,
                                 augment_mode=augment_mode,
+                                crop_scale=crop_scale,
                                 sensor_inputs=sensor_inputs,
                                 sensor_stats=sensor_stats,
                                 categorical_inputs=categorical_inputs)
@@ -307,6 +312,7 @@ def main():
                                 image_size=cfg["data"]["image_size"], train=False,
                                 regression_stats=regression_stats,
                                 augment_mode=augment_mode,
+                                crop_scale=crop_scale,
                                 sensor_inputs=sensor_inputs,
                                 sensor_stats=sensor_stats,
                                 categorical_inputs=categorical_inputs)
