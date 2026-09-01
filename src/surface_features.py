@@ -59,6 +59,7 @@ class SurfaceScan:
     texture: Optional[float] = None        # WHITE 국소표준편차
     redness: Optional[float] = None        # WHITE (R-G)/(R+G) %
     pore: Optional[float] = None           # WHITE 소형 암부 면적 %
+    gloss: Optional[float] = None          # WHITE 광택(유분 프록시, 실험적·저신뢰)
     white_sharpness: Optional[float] = None
     uv_sharpness: Optional[float] = None
     confidence: Dict[str, str] = field(default_factory=dict)  # 지표→ ok|low|unusable
@@ -103,7 +104,13 @@ def extract_white(bgr: np.ndarray) -> Dict[str, float]:
     texture = float(local_std.mean())
     redness = float(((r - g) / (r + g + 1e-6)).mean() * 100.0)
     over = float((gray >= 250).mean())
-    return dict(texture=texture, redness=redness, pore=pore,
+    # gloss(광택) = 밝고 채도낮은 흰 반사 픽셀 비율. 유분 프록시(실험적).
+    # ⚠ 조명 기하에 크게 교란됨(평면 부위가 LED 정면 → 반짝) + 정답/검증 없음 → 저신뢰.
+    mx = np.maximum(np.maximum(r, g), b)
+    mn = np.minimum(np.minimum(r, g), b)
+    sat = (mx - mn) / (mx + 1e-6)
+    gloss = float(((gray > 200) & (sat < 0.20)).mean() * 100.0)
+    return dict(texture=texture, redness=redness, pore=pore, gloss=gloss,
                 sharpness=_sharpness(gray), overexpose=over)
 
 
@@ -130,6 +137,8 @@ def process_scan(white_path: Optional[str], uv_path: Optional[str],
         if wimg is not None:
             wf = extract_white(wimg)
             scan.texture, scan.redness, scan.pore = wf["texture"], wf["redness"], wf["pore"]
+            scan.gloss = wf["gloss"]
+            scan.confidence["gloss"] = "experimental"  # 유분 프록시 — 조명기하 교란·미검증
             scan.white_sharpness = wf["sharpness"]
             reasons = []
             if wf["sharpness"] < SHARP_MIN_OK:
@@ -158,7 +167,7 @@ def process_scan(white_path: Optional[str], uv_path: Optional[str],
 
 # ---------------------------------------------------------------------------
 HIGHER_IS_WORSE = {"pigment": True, "heterogeneity": True, "porphyrin": True,
-                   "pore": True, "redness": True, "texture": False}
+                   "pore": True, "redness": True, "texture": False, "gloss": True}
 BANDS = ["양호", "보통", "주의"]
 
 
@@ -209,7 +218,7 @@ def main():
     args = ap.parse_args()
 
     scans = process_tree(args.root)
-    metrics = ["pigment", "heterogeneity", "texture", "redness", "pore", "porphyrin"]
+    metrics = ["pigment", "heterogeneity", "texture", "redness", "pore", "porphyrin", "gloss"]
     th = fit_cohort_thresholds(scans, metrics)
 
     with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
