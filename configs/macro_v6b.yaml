@@ -1,0 +1,90 @@
+# damda AI 학습 설정 — v6b-macro (crop_scale 멀티스케일 스윕: [0.10, 0.24])
+#
+# 목적: AI-Hub 얼굴부위 이미지를 HW 접사(scan_images) 스케일로 크롭해 재학습.
+#   기존 v3~v5.x 는 얼굴부위 화각 → 실측 접사에서 mean-collapse (infer_scan 로 실증).
+#   crop-매칭으로 화각 축을 메워 표면 지표만이라도 실측에서 살아나게 하는 실험.
+#
+# 핵심 변경 (baseline/v5.x → v6-macro):
+#   - data.augment_mode: scanner → macro  (부위 → crop_scale 패치 → 224 확대 + 가벼운 열화)
+#   - data.crop_scale: [0.10, 0.24]   # v6b: 멀티스케일 스윕 (배율 민감도 ablation)
+#   - sensor_inputs / categorical_inputs 비활성 → 순수 이미지 도메인 적응만 격리 검증
+#   - 표면 회귀/분류 헤드만 유지 (macro 패치서 라벨이 유효한 것):
+#       회귀   pore_value, pigmentation_value, wrinkle_value  (elasticity=비가시, moisture=센서 → 제외)
+#       분류   pore_grade, pigmentation_grade, wrinkle_grade, dryness_grade
+#             (sagging=얼굴윤곽 필요, skin_type/sensitive=홀리스틱 → 제외)
+#   - output_dir: checkpoints_v6b
+#
+# 검증: 재학습 후 `python -m src.infer_scan --root <scan_images> --ckpt checkpoints_v6macro\best`
+#   → 분류 헤드가 한 등급으로 붕괴하지 않고, 부위·사람 예측이 갈리면 성공.
+
+seed: 42
+
+# ===== Data =====
+data:
+  manifest_path: data/manifest.csv
+  image_size: 224
+  num_workers: 4
+  val_split: 0.15
+  test_split: 0.10
+  split_by: id
+
+  augment_mode: macro
+  crop_scale: [0.10, 0.24]   # v6b: 멀티스케일 스윕 (배율 민감도 ablation)
+
+  sensor_inputs: []          # v6-macro: 이미지 도메인 적응만 격리 → 센서 비활성
+  categorical_inputs: {}     # 자가입력도 비활성
+
+# ===== Model =====
+model:
+  backbone: resnet50
+  pretrained: true
+  region_emb_dim: 16
+  num_regions: 9
+  dropout: 0.2
+  sensor_emb_dim: 32
+
+  # 표면 회귀 3종만 (접사 패치서 라벨 유효)
+  regression_targets:
+    - pore_value
+    - pigmentation_value
+    - wrinkle_value
+
+  # 표면 분류 4종만
+  classification_heads:
+    wrinkle_grade: 7        # 0~6
+    pigmentation_grade: 6   # 0~5
+    pore_grade: 6           # 0~5
+    dryness_grade: 5        # 0~4
+
+# ===== Training =====
+training:
+  epochs: 50
+  batch_size: 16
+  optimizer: adam
+  lr: 0.0008
+  weight_decay: 0.0001
+  scheduler: cosine
+  warmup_epochs: 1
+
+  regression_weight: 1.0
+  classification_weight: 0.5
+
+  use_class_weights: false
+  classification_loss: ce
+  focal_gamma: 0.0
+
+  early_stop_patience: 12
+
+  amp: true
+
+# ===== Validation mode (--validation-mode) =====
+validation_mode:
+  max_samples: 2000
+  epochs: 10
+  log_every: 5
+
+# ===== Logging =====
+logging:
+  output_dir: checkpoints_v6b
+  log_dir: runs
+  save_every: 1

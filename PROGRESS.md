@@ -1,7 +1,7 @@
 # damda AI 학습 진행 기록
 
 > 졸업 프로젝트 "damda" 의 AI 모델 학습 일지. 각 버전마다 가설 → 변경 → 결과 → 발견 순으로 기록.
-> 마지막 업데이트: 2026-06-12 (v5.1 ~ v5.5b 결과, 이종 architecture ensemble v3+v5.1, 강화 TTA 까지)
+> 마지막 업데이트: 2026-09-01 (§8.3 v6-macro 본학습 결과: 부분 성공 — 색소 회복, 텍스처 헤드 미회복 + 코호트 교란)
 >
 > **현재 best 시연 모델**: **v3 + v5.1 ensemble + 강화 TTA** — test composite **0.6898**
 > (v3 단독 0.6461 / v5.1 단독 약 0.64x / v5.5b 학습 진행 중)
@@ -897,3 +897,63 @@ AI-Hub 028 의 스튜디오급 사진으로 학습한 모델이 ESP32-CAM 의 �
 - ⬜ best ckpt 자동 별도 보관 (`best.pt`) — 현재는 매 epoch 저장이라 best 찾으려면 epoch 번호 알아야 함
 - ⬜ python 프로세스 자동 재시작 (NSSM 서비스화 또는 watcher) — 현재는 schtasks 1회 실행만
 - ⬜ Wake-on-LAN 으로 원격 PC 복구 — 현재는 졸프실 물리방문 필수
+
+---
+
+## 8. 실측 도메인 갭 검증 + v6-macro 크롭 재학습 (2026-08-31, 졸업논문 단계)
+
+> §6 "시연 후 작업"의 **AI-Hub vs ESP32 도메인 비교 + ESP32-CAM 데이터 활용** 착수.
+> HW 실측 스캔이 처음 쌓임: `scan_images` 250장 (피험자 M1~M5 × 부위 5종 × 반복샷, WHITE_LED + UV, 800×600, 라벨 없음).
+
+### 8.1 실측 추론 — AI-Hub 앙상블 mean-collapse 확정
+
+**방법**: `src/infer_scan.py` 신규 — scan_images 트리를 v3+v5.1 ensemble(+TTA)로 일괄 추론, 부위별 예측 CSV + 반복샷 예측 불안정성 출력.
+
+**결과 (`scan_pred_ensemble.csv`, 250장)**
+- **분류 7헤드 붕괴**: dryness/pore/sensitive = 100% 단일 등급, 나머지 4헤드도 96~99% 단일 등급.
+- **회귀 이상**: elasticity 상수(0.30~0.32), wrinkle(~21, 학습 Ra~3의 6~8배)·pore 학습 스케일 밖으로 외삽.
+- 부위·사람 변별비(그룹간/반복샷) 1.4~2.2 = 사실상 변별 없음.
+
+**진단**: 도메인 갭의 지배 요인은 JPEG/색온도가 아니라 **화각(FOV)·배율 불일치**(접사 macro vs 얼굴부위). scanner_aug(v5)가 해상도·압축만 흉내내고 화각을 못 메운 이유가 여기. 전처리로는 회복 불가. → §6 "실존적 리스크(도메인 갭)"의 **데이터 근거 = negative result** 확보.
+
+### 8.2 surface_features — 라벨 없는 매크로 표면 지표 (대안, 작동)
+
+- `src/surface_features.py` / `src/score_scan.py`: UV 색소지수(암부율+불균일, 코호트 백분위) + WHITE texture → 3-band(양호/보통/주의). 부위별 최선명 프레임 선택.
+- **사람 변별 확인** (`surface_scores_clean.csv`): 색소지수 M2 34 < M3 37 < M1 41 < M4 63 < M5 75.
+- 라벨 부재 → 절대 임상수치 아님(상대 지수). 모공/포르피린은 초점 부족으로 unusable.
+- 발표/데모: 이 트랙 + `demo_provider`(예시데이터, "데모 모드" 배지)로 정직 시연. **성능 수치 조작 금지.**
+
+### 8.3 v6-macro — AI-Hub 크롭 재학습 (도메인 적응, 진행 중)
+
+**가설**: HW를 모델에 맞추는 대신, **AI-Hub 얼굴부위를 접사 스케일로 크롭**해 화각 축을 메우고 라벨을 재사용하면(=제대로 된 도메인 적응) 표면 헤드가 실측에서 살아난다.
+
+**스케일 보정**: `src/calibrate_crop.py` — 스케일별 크롭 패치 텍스처 스펙트럼 센트로이드 vs HW(≈0.028) 비교. 단일 최적은 0.10이나 과도하게 뭉개져 텍스처 소실 → 몽타주(`crop_calib.png`) 눈확인 후 **crop_scale 범위 [0.12, 0.20]** 채택.
+
+**변경 (전부 additive — normal/scanner·baseline.yaml 불변)**
+- `dataset.py`: `MacroPatchCrop` + `augment_mode='macro'` (부위크롭 → 패치크롭 → 224 확대 → 가벼운 blur/jpeg/noise, LowResSimulate 제외). train/eval 모두 macro 크롭 적용.
+- `train.py`: `cfg["data"]["crop_scale"]` 읽어 Dataset에 전달.
+- `configs/macro.yaml`: 표면 헤드만 (회귀 pore/pigmentation/wrinkle, 분류 pore/pigmentation/wrinkle/dryness_grade), sensor/categorical off, `output_dir: checkpoints_v6macro`.
+- `_train_payload_macro.bat`: schtasks detach 런처.
+
+**sanity 통과**: validation-mode(2000장·10ep) val 1.11→1.05, `augment_mode=macro`·`crop_scale=(0.12,0.2)` 정상 로깅.
+
+**한계 (정직)**: 크롭 후 라벨 유효성 때문에 **표면 헤드만 개선 기대**. moisture(→센서)·elasticity(비가시)·sagging(얼굴윤곽)·skin_type/sensitive(홀리스틱)은 제외.
+
+**본 학습 결과 (2026-09-01, `checkpoints_v6macro/epoch046.pt`, best val 0.9010 @ep46)**
+- `infer_scan`로 실측 250장 재추론 → **부분 성공**:
+  - ✅ 색소 계열 회복: `pigmentation_grade` 98% 단일 → **67%(2등급 분화, 85 vs 42장)**, 회귀 변별비(그룹간/반복샷) **1.4~2.2 → 3.8~4.3**.
+  - ⚠️ `pore_grade`/`wrinkle_grade`/`dryness_grade`는 여전히 100% 단일. 사람별 회귀는 평평(부위별 변화가 주 → 부위 임베딩 기여 가능).
+- 해석: 화각 크롭이 **색소는 되살렸으나 미세 텍스처 헤드는 미회복**. 잔여 갭 = 텍스처 해상도(접사가 소프트해 고주파 부재).
+- ⚠️ **코호트 교란(중요)**: 실측 피험자 5명이 전원 팀원(20대·피부 양호·주름 거의 없음). 따라서 `wrinkle_grade`가 전부 낮은 등급인 것은 순수 '붕괴'가 아니라 **실제로 주름이 없어서**일 수 있음(정답과 구분 불가). 즉 이 코호트로는 주름/노화 지표를 검증할 수 없음 → 검증 결론은 색소(피험자 간 실제 변동 존재)에 한정.
+- 산출물: `scan_pred_macro.csv`, `v6macro_결과_비교.html`.
+
+**다음**: (a) crop_scale 스윕(텍스처 보존 ↑) 재학습 (b) 촬영 초점·LED 개선 후 재수집 (c) **연령·피부 다양성 있는 검증셋** 확보(현 코호트는 주름/노화 미검증) (d) 색소=v6-macro / 나머지=surface_features 하이브리드.
+
+### 8.4 산출물
+
+- 코드: `src/infer_scan.py`, `src/surface_features.py`, `src/score_scan.py`, `src/demo_provider.py`, `src/calibrate_crop.py`, `configs/macro.yaml`, `_train_payload_macro.bat`, `dataset.py`(macro)
+- 데이터/자료: `scan_pred_ensemble.csv`, `surface_scores_clean.csv`, `crop_calib.png`, `HW스캔_도메인갭_진단_v1.html`, `B안_모델재설계_스펙_v1.html`, `HW스캔_결과_before_after.html`
+
+### 8.5 아키텍처 메모
+
+- 실시간 카메라 프리뷰 = **FE(+HW 펌웨어 MJPEG `/stream`) 영역**, BE는 원칙적으로 불필요(브라우저가 ESP32에 직결). BE는 캡처 스틸 → 추론만.
