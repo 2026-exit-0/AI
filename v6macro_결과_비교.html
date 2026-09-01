@@ -1,0 +1,36 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>v6-macro 결과</title><style>
+:root{--bg:#f7f7f5;--card:#fff;--ink:#1c1e24;--sub:#5b6270;--line:#e4e6ea;--accent:#2f6df6;--warn:#d9534f;--ok:#2e9e5b;--chip:#eef2fb;}
+@media(prefers-color-scheme:dark){:root{--bg:#14161b;--card:#1c1f27;--ink:#e8eaee;--sub:#a0a7b4;--line:#2b2f39;--accent:#5b8dff;--ok:#4bbd77;--chip:#20263a;}}
+*{box-sizing:border-box}body{margin:0}.wrap{max-width:820px;margin:0 auto;padding:30px 20px 70px;color:var(--ink);font-family:'Malgun Gothic','Apple SD Gothic Neo',system-ui,sans-serif;line-height:1.6;background:var(--bg)}
+h1{font-size:23px;margin:0 0 4px}h2{font-size:17px;margin:26px 0 10px;border-bottom:2px solid var(--line);padding-bottom:5px}
+.meta{color:var(--sub);font-size:13px;margin-bottom:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:12px 0}
+table{border-collapse:collapse;width:100%;font-size:13.5px}th,td{padding:7px 10px;border-bottom:1px solid var(--line)}th{color:var(--sub);font-size:12px;text-align:left}
+.tag{display:inline-block;border-radius:20px;padding:2px 10px;font-size:12px;font-weight:700}.bad{background:#fdecea;color:#b3251c}.ok{background:#e7f6ec;color:#1c7a44}
+.foot{color:var(--sub);font-size:12px;margin-top:24px;border-top:1px solid var(--line);padding-top:10px}</style></head><body><div class="wrap">
+<h1>담다 · v6-macro 크롭 재학습 결과</h1>
+<div class="meta">2026-09-01 · 접사 크롭(scale 0.12~0.20) 재학습 (best val 0.90 @ep46) · 실측 250장 추론 비교</div>
+<div class="card"><p style="margin:4px 0"><span class="tag ok">부분 성공</span> 화각 크롭으로 <b>색소 계열은 되살아났으나</b>, 고주파 텍스처 의존 헤드(모공/주름/건조)는 여전히 붕괴.</p>
+<p style="margin:4px 0;font-size:13.5px">→ 잔여 갭 = <b>텍스처 해상도</b>(화각은 크롭으로 메웠지만 접사 자체가 소프트). 논문의 명확한 ablation 근거.</p></div>
+
+<h2>분류 헤드 — 단일 등급 비율 (낮을수록 변별)</h2>
+<div class="card"><table>
+<tr><th>헤드</th><th style="text-align:center">기존 앙상블</th><th style="text-align:center">v6-macro</th><th style="text-align:center">판정</th></tr>
+<tr><td>pore_grade</td><td style='text-align:center'>100% (1종)</td><td style='text-align:center;color:var(--sub);font-weight:700'>100% (1종)</td><td style='text-align:center'>변화 없음</td></tr><tr><td>pigmentation_grade</td><td style='text-align:center'>98% (3종)</td><td style='text-align:center;color:var(--ok);font-weight:700'>67% (2종)</td><td style='text-align:center'>✅ 개선</td></tr><tr><td>wrinkle_grade</td><td style='text-align:center'>99% (2종)</td><td style='text-align:center;color:var(--sub);font-weight:700'>100% (1종)</td><td style='text-align:center'>변화 없음</td></tr><tr><td>dryness_grade</td><td style='text-align:center'>100% (1종)</td><td style='text-align:center;color:var(--sub);font-weight:700'>100% (1종)</td><td style='text-align:center'>변화 없음</td></tr>
+</table></div>
+
+<h2>회귀 헤드 — 변별비 (그룹간/반복샷, 높을수록 변별)</h2>
+<div class="card"><table>
+<tr><th>헤드</th><th style="text-align:center">기존 앙상블</th><th style="text-align:center">v6-macro</th><th style="text-align:center">판정</th></tr>
+<tr><td>pore_value</td><td style='text-align:center'>1.4</td><td style='text-align:center;color:var(--ok);font-weight:700'>4.3</td><td style='text-align:center'>✅ 상승</td></tr><tr><td>pigmentation_value</td><td style='text-align:center'>1.6</td><td style='text-align:center;color:var(--ok);font-weight:700'>4.3</td><td style='text-align:center'>✅ 상승</td></tr><tr><td>wrinkle_value</td><td style='text-align:center'>1.9</td><td style='text-align:center;color:var(--ok);font-weight:700'>3.8</td><td style='text-align:center'>✅ 상승</td></tr>
+</table></div>
+
+<h2>해석 &amp; 다음</h2>
+<div class="card">
+<p style="margin:4px 0">① <b>색소(pigmentation)</b>: grade가 2등급으로 갈리고 value 변별비 상승 → 크롭 도메인 적응이 <b>먹힌 채널</b>. UV/색 기반이 실측서 가장 강하다는 앞선 진단과 일치.</p>
+<p style="margin:4px 0">② <b>모공·주름·건조</b>: 여전히 단일 등급. 접사가 소프트해 미세 텍스처가 없어 학습 신호 부족.</p>
+<p style="margin:4px 0">③ 사람별 회귀는 아직 평평(부위별 변화가 주) → 개인 변별은 제한적.</p>
+<p style="margin:8px 0 4px"><b>다음 카드:</b> (a) 색소는 v6-macro 모델, 나머지는 surface_features로 <b>하이브리드</b> (b) 텍스처 헤드는 <b>촬영 초점·LED 개선</b> 후 재수집이 근본책 (c) 소량 <b>약지도 라벨</b> 확보 시 fine-tune.</p>
+</div>
+<div class="foot">기존=v3+v5.1 ensemble+TTA, v6-macro=접사 크롭 재학습. 공통 헤드만 비교. 절대 임상수치 아님(상대 지수).</div>
+</div></body></html>
